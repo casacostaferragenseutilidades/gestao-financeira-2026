@@ -1,4 +1,9 @@
-import { randomUUID } from "crypto";
+import { eq, and, lte, gte, sql } from "drizzle-orm";
+import { db } from "./db";
+import {
+  users, suppliers, clients, categories, costCenters,
+  accountsPayable, accountsReceivable, mercadoPagoTransactions,
+} from "@shared/schema";
 import type {
   User, InsertUser,
   Supplier, InsertSupplier,
@@ -12,40 +17,34 @@ import type {
 } from "@shared/schema";
 
 export interface IStorage {
-  // Users
   getUser(id: string): Promise<User | undefined>;
   getUserByUsername(username: string): Promise<User | undefined>;
   createUser(user: InsertUser): Promise<User>;
 
-  // Suppliers
   getSuppliers(): Promise<Supplier[]>;
   getSupplier(id: string): Promise<Supplier | undefined>;
   createSupplier(supplier: InsertSupplier): Promise<Supplier>;
   updateSupplier(id: string, supplier: Partial<InsertSupplier>): Promise<Supplier | undefined>;
   deleteSupplier(id: string): Promise<boolean>;
 
-  // Clients
   getClients(): Promise<Client[]>;
   getClient(id: string): Promise<Client | undefined>;
   createClient(client: InsertClient): Promise<Client>;
   updateClient(id: string, client: Partial<InsertClient>): Promise<Client | undefined>;
   deleteClient(id: string): Promise<boolean>;
 
-  // Categories
   getCategories(): Promise<Category[]>;
   getCategory(id: string): Promise<Category | undefined>;
   createCategory(category: InsertCategory): Promise<Category>;
   updateCategory(id: string, category: Partial<InsertCategory>): Promise<Category | undefined>;
   deleteCategory(id: string): Promise<boolean>;
 
-  // Cost Centers
   getCostCenters(): Promise<CostCenter[]>;
   getCostCenter(id: string): Promise<CostCenter | undefined>;
   createCostCenter(costCenter: InsertCostCenter): Promise<CostCenter>;
   updateCostCenter(id: string, costCenter: Partial<InsertCostCenter>): Promise<CostCenter | undefined>;
   deleteCostCenter(id: string): Promise<boolean>;
 
-  // Accounts Payable
   getAccountsPayable(): Promise<AccountPayable[]>;
   getAccountPayable(id: string): Promise<AccountPayable | undefined>;
   getUpcomingAccountsPayable(): Promise<AccountPayable[]>;
@@ -54,7 +53,6 @@ export interface IStorage {
   markAccountPayableAsPaid(id: string, paymentDate: string): Promise<AccountPayable | undefined>;
   deleteAccountPayable(id: string): Promise<boolean>;
 
-  // Accounts Receivable
   getAccountsReceivable(): Promise<AccountReceivable[]>;
   getAccountReceivable(id: string): Promise<AccountReceivable | undefined>;
   getUpcomingAccountsReceivable(): Promise<AccountReceivable[]>;
@@ -63,31 +61,27 @@ export interface IStorage {
   markAccountReceivableAsReceived(id: string, receivedDate: string): Promise<AccountReceivable | undefined>;
   deleteAccountReceivable(id: string): Promise<boolean>;
 
-  // Dashboard
   getDashboardStats(): Promise<DashboardStats>;
   getCashFlowData(period: string): Promise<CashFlowData[]>;
   getCashFlowSummary(period: string): Promise<{ totalIncome: number; totalExpense: number; netFlow: number; projectedBalance: number; currentBalance: number }>;
   getCategoryExpenses(): Promise<CategoryExpense[]>;
   getDREData(year: number, month: number): Promise<{ current: DREData; previous: DREData; percentageChange: { grossRevenue: number; netProfit: number } }>;
+  
+  seedDefaultData(): Promise<void>;
 }
 
-export class MemStorage implements IStorage {
-  private users: Map<string, User> = new Map();
-  private suppliers: Map<string, Supplier> = new Map();
-  private clients: Map<string, Client> = new Map();
-  private categories: Map<string, Category> = new Map();
-  private costCenters: Map<string, CostCenter> = new Map();
-  private accountsPayable: Map<string, AccountPayable> = new Map();
-  private accountsReceivable: Map<string, AccountReceivable> = new Map();
-  private mercadoPagoTransactions: Map<string, MercadoPagoTransaction> = new Map();
-
-  constructor() {
-    this.seedData();
+export class DatabaseStorage implements IStorage {
+  private formatDate(date: Date, daysOffset: number = 0): string {
+    const d = new Date(date);
+    d.setDate(d.getDate() + daysOffset);
+    return d.toISOString().split("T")[0];
   }
 
-  private seedData() {
-    // Seed categories
-    const categories = [
+  async seedDefaultData(): Promise<void> {
+    const existingCategories = await db.select().from(categories);
+    if (existingCategories.length > 0) return;
+
+    const defaultCategories = [
       { name: "Vendas de Produtos", type: "income", dreCategory: "revenue" },
       { name: "Prestação de Serviços", type: "income", dreCategory: "revenue" },
       { name: "Outras Receitas", type: "income", dreCategory: "revenue" },
@@ -100,48 +94,49 @@ export class MemStorage implements IStorage {
       { name: "Utilidades", type: "expense", dreCategory: "operational_expenses" },
       { name: "Material de Escritório", type: "expense", dreCategory: "operational_expenses" },
     ];
-    categories.forEach((cat) => {
-      const id = randomUUID();
-      this.categories.set(id, { id, ...cat });
-    });
 
-    // Seed cost centers
-    const costCenters = [
+    for (const cat of defaultCategories) {
+      await db.insert(categories).values(cat);
+    }
+
+    const defaultCostCenters = [
       { name: "Administrativo", description: "Despesas administrativas gerais" },
       { name: "Comercial", description: "Departamento de vendas e marketing" },
       { name: "Operacional", description: "Operações e produção" },
       { name: "TI", description: "Tecnologia da informação" },
     ];
-    costCenters.forEach((cc) => {
-      const id = randomUUID();
-      this.costCenters.set(id, { id, ...cc });
-    });
 
-    // Seed suppliers
-    const suppliers = [
+    for (const cc of defaultCostCenters) {
+      await db.insert(costCenters).values(cc);
+    }
+
+    const supplierData = [
       { name: "Fornecedor ABC Ltda", document: "12.345.678/0001-90", email: "contato@abc.com", phone: "(11) 3456-7890", address: "Rua das Flores, 123" },
       { name: "Distribuidora XYZ", document: "98.765.432/0001-10", email: "vendas@xyz.com", phone: "(11) 9876-5432", address: "Av. Principal, 456" },
     ];
-    suppliers.forEach((sup) => {
-      const id = randomUUID();
-      this.suppliers.set(id, { id, ...sup });
-    });
 
-    // Seed clients
-    const clients = [
+    for (const sup of supplierData) {
+      await db.insert(suppliers).values(sup);
+    }
+
+    const clientData = [
       { name: "Cliente Premium S.A.", document: "11.222.333/0001-44", email: "compras@premium.com", phone: "(11) 1234-5678", address: "Av. Comercial, 789" },
       { name: "Empresa Beta Ltda", document: "44.555.666/0001-77", email: "financeiro@beta.com", phone: "(11) 8765-4321", address: "Rua Industrial, 321" },
     ];
-    clients.forEach((cli) => {
-      const id = randomUUID();
-      this.clients.set(id, { id, ...cli });
-    });
 
-    // Seed sample accounts payable
+    for (const cli of clientData) {
+      await db.insert(clients).values(cli);
+    }
+
+    const allSuppliers = await db.select().from(suppliers);
+    const allClients = await db.select().from(clients);
+    const allCategories = await db.select().from(categories);
+    const allCostCenters = await db.select().from(costCenters);
+
+    const expenseCategories = allCategories.filter(c => c.type === "expense");
+    const incomeCategories = allCategories.filter(c => c.type === "income" && c.dreCategory === "revenue");
+
     const today = new Date();
-    const supplierIds = Array.from(this.suppliers.keys());
-    const expenseCategories = Array.from(this.categories.values()).filter(c => c.type === "expense");
-    const costCenterIds = Array.from(this.costCenters.keys());
 
     const payables = [
       { description: "Aluguel do escritório", amount: "5000.00", dueDate: this.formatDate(today, 5), status: "pending" },
@@ -151,24 +146,15 @@ export class MemStorage implements IStorage {
       { description: "Manutenção equipamentos", amount: "1200.00", dueDate: this.formatDate(today, 15), status: "pending" },
     ];
 
-    payables.forEach((pay, i) => {
-      const id = randomUUID();
-      this.accountsPayable.set(id, {
-        id,
+    for (let i = 0; i < payables.length; i++) {
+      const pay = payables[i];
+      await db.insert(accountsPayable).values({
         ...pay,
-        supplierId: supplierIds[i % supplierIds.length],
+        supplierId: allSuppliers[i % allSuppliers.length]?.id || null,
         categoryId: expenseCategories[i % expenseCategories.length]?.id || null,
-        costCenterId: costCenterIds[i % costCenterIds.length],
-        notes: null,
-        attachmentUrl: null,
-        recurrence: null,
-        paymentDate: pay.paymentDate || null,
+        costCenterId: allCostCenters[i % allCostCenters.length]?.id || null,
       });
-    });
-
-    // Seed sample accounts receivable
-    const clientIds = Array.from(this.clients.keys());
-    const incomeCategories = Array.from(this.categories.values()).filter(c => c.type === "income" && c.dreCategory === "revenue");
+    }
 
     const receivables = [
       { description: "Venda produto lote 001", amount: "15000.00", dueDate: this.formatDate(today, 3), status: "pending" },
@@ -178,321 +164,269 @@ export class MemStorage implements IStorage {
       { description: "Projeto especial", amount: "25000.00", dueDate: this.formatDate(today, 20), status: "pending" },
     ];
 
-    receivables.forEach((rec, i) => {
-      const id = randomUUID();
-      this.accountsReceivable.set(id, {
-        id,
+    for (let i = 0; i < receivables.length; i++) {
+      const rec = receivables[i];
+      await db.insert(accountsReceivable).values({
         ...rec,
-        clientId: clientIds[i % clientIds.length],
+        clientId: allClients[i % allClients.length]?.id || null,
         categoryId: incomeCategories[i % incomeCategories.length]?.id || null,
-        notes: null,
-        mercadoPagoId: null,
-        receivedDate: rec.receivedDate || null,
       });
-    });
+    }
   }
 
-  private formatDate(date: Date, daysOffset: number = 0): string {
-    const d = new Date(date);
-    d.setDate(d.getDate() + daysOffset);
-    return d.toISOString().split("T")[0];
-  }
-
-  // Users
   async getUser(id: string): Promise<User | undefined> {
-    return this.users.get(id);
+    const [user] = await db.select().from(users).where(eq(users.id, id));
+    return user;
   }
 
   async getUserByUsername(username: string): Promise<User | undefined> {
-    return Array.from(this.users.values()).find((u) => u.username === username);
+    const [user] = await db.select().from(users).where(eq(users.username, username));
+    return user;
   }
 
   async createUser(user: InsertUser): Promise<User> {
-    const id = randomUUID();
-    const newUser: User = { id, ...user };
-    this.users.set(id, newUser);
+    const [newUser] = await db.insert(users).values(user).returning();
     return newUser;
   }
 
-  // Suppliers
   async getSuppliers(): Promise<Supplier[]> {
-    return Array.from(this.suppliers.values());
+    return db.select().from(suppliers);
   }
 
   async getSupplier(id: string): Promise<Supplier | undefined> {
-    return this.suppliers.get(id);
+    const [supplier] = await db.select().from(suppliers).where(eq(suppliers.id, id));
+    return supplier;
   }
 
   async createSupplier(supplier: InsertSupplier): Promise<Supplier> {
-    const id = randomUUID();
-    const newSupplier: Supplier = { id, ...supplier };
-    this.suppliers.set(id, newSupplier);
+    const [newSupplier] = await db.insert(suppliers).values(supplier).returning();
     return newSupplier;
   }
 
   async updateSupplier(id: string, supplier: Partial<InsertSupplier>): Promise<Supplier | undefined> {
-    const existing = this.suppliers.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, ...supplier };
-    this.suppliers.set(id, updated);
+    const [updated] = await db.update(suppliers).set(supplier).where(eq(suppliers.id, id)).returning();
     return updated;
   }
 
   async deleteSupplier(id: string): Promise<boolean> {
-    return this.suppliers.delete(id);
+    const result = await db.delete(suppliers).where(eq(suppliers.id, id));
+    return true;
   }
 
-  // Clients
   async getClients(): Promise<Client[]> {
-    return Array.from(this.clients.values());
+    return db.select().from(clients);
   }
 
   async getClient(id: string): Promise<Client | undefined> {
-    return this.clients.get(id);
+    const [client] = await db.select().from(clients).where(eq(clients.id, id));
+    return client;
   }
 
   async createClient(client: InsertClient): Promise<Client> {
-    const id = randomUUID();
-    const newClient: Client = { id, ...client };
-    this.clients.set(id, newClient);
+    const [newClient] = await db.insert(clients).values(client).returning();
     return newClient;
   }
 
   async updateClient(id: string, client: Partial<InsertClient>): Promise<Client | undefined> {
-    const existing = this.clients.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, ...client };
-    this.clients.set(id, updated);
+    const [updated] = await db.update(clients).set(client).where(eq(clients.id, id)).returning();
     return updated;
   }
 
   async deleteClient(id: string): Promise<boolean> {
-    return this.clients.delete(id);
+    await db.delete(clients).where(eq(clients.id, id));
+    return true;
   }
 
-  // Categories
   async getCategories(): Promise<Category[]> {
-    return Array.from(this.categories.values());
+    return db.select().from(categories);
   }
 
   async getCategory(id: string): Promise<Category | undefined> {
-    return this.categories.get(id);
+    const [category] = await db.select().from(categories).where(eq(categories.id, id));
+    return category;
   }
 
   async createCategory(category: InsertCategory): Promise<Category> {
-    const id = randomUUID();
-    const newCategory: Category = { id, ...category };
-    this.categories.set(id, newCategory);
+    const [newCategory] = await db.insert(categories).values(category).returning();
     return newCategory;
   }
 
   async updateCategory(id: string, category: Partial<InsertCategory>): Promise<Category | undefined> {
-    const existing = this.categories.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, ...category };
-    this.categories.set(id, updated);
+    const [updated] = await db.update(categories).set(category).where(eq(categories.id, id)).returning();
     return updated;
   }
 
   async deleteCategory(id: string): Promise<boolean> {
-    return this.categories.delete(id);
+    await db.delete(categories).where(eq(categories.id, id));
+    return true;
   }
 
-  // Cost Centers
   async getCostCenters(): Promise<CostCenter[]> {
-    return Array.from(this.costCenters.values());
+    return db.select().from(costCenters);
   }
 
   async getCostCenter(id: string): Promise<CostCenter | undefined> {
-    return this.costCenters.get(id);
+    const [costCenter] = await db.select().from(costCenters).where(eq(costCenters.id, id));
+    return costCenter;
   }
 
   async createCostCenter(costCenter: InsertCostCenter): Promise<CostCenter> {
-    const id = randomUUID();
-    const newCostCenter: CostCenter = { id, ...costCenter };
-    this.costCenters.set(id, newCostCenter);
+    const [newCostCenter] = await db.insert(costCenters).values(costCenter).returning();
     return newCostCenter;
   }
 
   async updateCostCenter(id: string, costCenter: Partial<InsertCostCenter>): Promise<CostCenter | undefined> {
-    const existing = this.costCenters.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, ...costCenter };
-    this.costCenters.set(id, updated);
+    const [updated] = await db.update(costCenters).set(costCenter).where(eq(costCenters.id, id)).returning();
     return updated;
   }
 
   async deleteCostCenter(id: string): Promise<boolean> {
-    return this.costCenters.delete(id);
+    await db.delete(costCenters).where(eq(costCenters.id, id));
+    return true;
   }
 
-  // Accounts Payable
   async getAccountsPayable(): Promise<AccountPayable[]> {
-    return Array.from(this.accountsPayable.values());
+    return db.select().from(accountsPayable);
   }
 
   async getAccountPayable(id: string): Promise<AccountPayable | undefined> {
-    return this.accountsPayable.get(id);
+    const [account] = await db.select().from(accountsPayable).where(eq(accountsPayable.id, id));
+    return account;
   }
 
   async getUpcomingAccountsPayable(): Promise<AccountPayable[]> {
     const today = new Date();
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
+    const todayStr = today.toISOString().split("T")[0];
+    const nextWeekStr = nextWeek.toISOString().split("T")[0];
 
-    return Array.from(this.accountsPayable.values())
-      .filter((a) => a.status === "pending")
-      .filter((a) => {
-        const dueDate = new Date(a.dueDate + "T00:00:00");
-        return dueDate <= nextWeek;
-      })
-      .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+    return db.select().from(accountsPayable)
+      .where(and(
+        eq(accountsPayable.status, "pending"),
+        lte(accountsPayable.dueDate, nextWeekStr)
+      ));
   }
 
   async createAccountPayable(account: InsertAccountPayable): Promise<AccountPayable> {
-    const id = randomUUID();
-    const newAccount: AccountPayable = { 
-      id, 
+    const [newAccount] = await db.insert(accountsPayable).values({
       ...account,
       status: account.status || "pending",
-      paymentDate: account.paymentDate || null,
-      notes: account.notes || null,
-      attachmentUrl: account.attachmentUrl || null,
-      recurrence: account.recurrence || null,
-      supplierId: account.supplierId || null,
-      categoryId: account.categoryId || null,
-      costCenterId: account.costCenterId || null,
-    };
-    this.accountsPayable.set(id, newAccount);
+    }).returning();
     return newAccount;
   }
 
   async updateAccountPayable(id: string, account: Partial<InsertAccountPayable>): Promise<AccountPayable | undefined> {
-    const existing = this.accountsPayable.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, ...account };
-    this.accountsPayable.set(id, updated);
+    const [updated] = await db.update(accountsPayable).set(account).where(eq(accountsPayable.id, id)).returning();
     return updated;
   }
 
   async markAccountPayableAsPaid(id: string, paymentDate: string): Promise<AccountPayable | undefined> {
-    const existing = this.accountsPayable.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, status: "paid", paymentDate };
-    this.accountsPayable.set(id, updated);
+    const [updated] = await db.update(accountsPayable)
+      .set({ status: "paid", paymentDate })
+      .where(eq(accountsPayable.id, id))
+      .returning();
     return updated;
   }
 
   async deleteAccountPayable(id: string): Promise<boolean> {
-    return this.accountsPayable.delete(id);
+    await db.delete(accountsPayable).where(eq(accountsPayable.id, id));
+    return true;
   }
 
-  // Accounts Receivable
   async getAccountsReceivable(): Promise<AccountReceivable[]> {
-    return Array.from(this.accountsReceivable.values());
+    return db.select().from(accountsReceivable);
   }
 
   async getAccountReceivable(id: string): Promise<AccountReceivable | undefined> {
-    return this.accountsReceivable.get(id);
+    const [account] = await db.select().from(accountsReceivable).where(eq(accountsReceivable.id, id));
+    return account;
   }
 
   async getUpcomingAccountsReceivable(): Promise<AccountReceivable[]> {
     const today = new Date();
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
+    const nextWeekStr = nextWeek.toISOString().split("T")[0];
 
-    return Array.from(this.accountsReceivable.values())
-      .filter((a) => a.status === "pending")
-      .filter((a) => {
-        const dueDate = new Date(a.dueDate + "T00:00:00");
-        return dueDate <= nextWeek;
-      })
-      .sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime());
+    return db.select().from(accountsReceivable)
+      .where(and(
+        eq(accountsReceivable.status, "pending"),
+        lte(accountsReceivable.dueDate, nextWeekStr)
+      ));
   }
 
   async createAccountReceivable(account: InsertAccountReceivable): Promise<AccountReceivable> {
-    const id = randomUUID();
-    const newAccount: AccountReceivable = { 
-      id, 
+    const [newAccount] = await db.insert(accountsReceivable).values({
       ...account,
       status: account.status || "pending",
-      receivedDate: account.receivedDate || null,
-      notes: account.notes || null,
-      mercadoPagoId: account.mercadoPagoId || null,
-      clientId: account.clientId || null,
-      categoryId: account.categoryId || null,
-    };
-    this.accountsReceivable.set(id, newAccount);
+    }).returning();
     return newAccount;
   }
 
   async updateAccountReceivable(id: string, account: Partial<InsertAccountReceivable>): Promise<AccountReceivable | undefined> {
-    const existing = this.accountsReceivable.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, ...account };
-    this.accountsReceivable.set(id, updated);
+    const [updated] = await db.update(accountsReceivable).set(account).where(eq(accountsReceivable.id, id)).returning();
     return updated;
   }
 
   async markAccountReceivableAsReceived(id: string, receivedDate: string): Promise<AccountReceivable | undefined> {
-    const existing = this.accountsReceivable.get(id);
-    if (!existing) return undefined;
-    const updated = { ...existing, status: "received", receivedDate };
-    this.accountsReceivable.set(id, updated);
+    const [updated] = await db.update(accountsReceivable)
+      .set({ status: "received", receivedDate })
+      .where(eq(accountsReceivable.id, id))
+      .returning();
     return updated;
   }
 
   async deleteAccountReceivable(id: string): Promise<boolean> {
-    return this.accountsReceivable.delete(id);
+    await db.delete(accountsReceivable).where(eq(accountsReceivable.id, id));
+    return true;
   }
 
-  // Dashboard
   async getDashboardStats(): Promise<DashboardStats> {
-    const payables = Array.from(this.accountsPayable.values());
-    const receivables = Array.from(this.accountsReceivable.values());
+    const allPayables = await db.select().from(accountsPayable);
+    const allReceivables = await db.select().from(accountsReceivable);
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-
-    const totalExpenses = payables
-      .filter((p) => p.status === "paid")
-      .reduce((sum, p) => sum + parseFloat(p.amount), 0);
-
-    const totalRevenue = receivables
-      .filter((r) => r.status === "received")
-      .reduce((sum, r) => sum + parseFloat(r.amount), 0);
-
-    const pendingPayables = payables
-      .filter((p) => p.status === "pending")
-      .reduce((sum, p) => sum + parseFloat(p.amount), 0);
-
-    const pendingReceivables = receivables
-      .filter((r) => r.status === "pending")
-      .reduce((sum, r) => sum + parseFloat(r.amount), 0);
-
-    const overduePayables = payables.filter((p) => {
-      if (p.status === "paid") return false;
-      const dueDate = new Date(p.dueDate + "T00:00:00");
-      return dueDate < today;
-    }).length;
-
-    const overdueReceivables = receivables.filter((r) => {
-      if (r.status === "received") return false;
-      const dueDate = new Date(r.dueDate + "T00:00:00");
-      return dueDate < today;
-    }).length;
-
     const todayStr = today.toISOString().split("T")[0];
-    const dueTodayCount = [...payables, ...receivables].filter((a) => {
+
+    const totalExpenses = allPayables
+      .filter(p => p.status === "paid")
+      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
+
+    const totalRevenue = allReceivables
+      .filter(r => r.status === "received")
+      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
+
+    const pendingPayables = allPayables
+      .filter(p => p.status === "pending")
+      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
+
+    const pendingReceivables = allReceivables
+      .filter(r => r.status === "pending")
+      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
+
+    const overduePayables = allPayables.filter(p => {
+      if (p.status === "paid") return false;
+      return p.dueDate < todayStr;
+    }).length;
+
+    const overdueReceivables = allReceivables.filter(r => {
+      if (r.status === "received") return false;
+      return r.dueDate < todayStr;
+    }).length;
+
+    const dueTodayCount = [...allPayables, ...allReceivables].filter(a => {
       if (a.status === "paid" || a.status === "received") return false;
       return a.dueDate === todayStr;
     }).length;
 
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
-    const dueThisWeekCount = [...payables, ...receivables].filter((a) => {
+    const nextWeekStr = nextWeek.toISOString().split("T")[0];
+
+    const dueThisWeekCount = [...allPayables, ...allReceivables].filter(a => {
       if (a.status === "paid" || a.status === "received") return false;
-      const dueDate = new Date(a.dueDate + "T00:00:00");
-      return dueDate >= today && dueDate <= nextWeek;
+      return a.dueDate >= todayStr && a.dueDate <= nextWeekStr;
     }).length;
 
     const balance = totalRevenue - totalExpenses;
@@ -511,8 +445,8 @@ export class MemStorage implements IStorage {
   }
 
   async getCashFlowData(period: string): Promise<CashFlowData[]> {
-    const payables = Array.from(this.accountsPayable.values());
-    const receivables = Array.from(this.accountsReceivable.values());
+    const allPayables = await db.select().from(accountsPayable);
+    const allReceivables = await db.select().from(accountsReceivable);
     
     const today = new Date();
     const data: Map<string, CashFlowData> = new Map();
@@ -528,13 +462,13 @@ export class MemStorage implements IStorage {
       date.setDate(date.getDate() + i);
       const dateStr = date.toISOString().split("T")[0];
       
-      const dayIncome = receivables
-        .filter((r) => (r.status === "received" ? r.receivedDate === dateStr : r.dueDate === dateStr))
-        .reduce((sum, r) => sum + parseFloat(r.amount), 0);
+      const dayIncome = allReceivables
+        .filter(r => (r.status === "received" ? r.receivedDate === dateStr : r.dueDate === dateStr))
+        .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
       
-      const dayExpense = payables
-        .filter((p) => (p.status === "paid" ? p.paymentDate === dateStr : p.dueDate === dateStr))
-        .reduce((sum, p) => sum + parseFloat(p.amount), 0);
+      const dayExpense = allPayables
+        .filter(p => (p.status === "paid" ? p.paymentDate === dateStr : p.dueDate === dateStr))
+        .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
       
       runningBalance += dayIncome - dayExpense;
       
@@ -567,15 +501,18 @@ export class MemStorage implements IStorage {
   }
 
   async getCategoryExpenses(): Promise<CategoryExpense[]> {
-    const payables = Array.from(this.accountsPayable.values()).filter((p) => p.categoryId);
-    const categories = Array.from(this.categories.values()).filter((c) => c.type === "expense");
+    const allPayables = await db.select().from(accountsPayable);
+    const allCategories = await db.select().from(categories);
     
-    const total = payables.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+    const expenseCategories = allCategories.filter(c => c.type === "expense");
+    const payablesWithCategory = allPayables.filter(p => p.categoryId);
     
-    return categories.map((cat) => {
-      const amount = payables
-        .filter((p) => p.categoryId === cat.id)
-        .reduce((sum, p) => sum + parseFloat(p.amount), 0);
+    const total = payablesWithCategory.reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
+    
+    return expenseCategories.map(cat => {
+      const amount = payablesWithCategory
+        .filter(p => p.categoryId === cat.id)
+        .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
       
       return {
         categoryId: cat.id,
@@ -583,26 +520,28 @@ export class MemStorage implements IStorage {
         amount,
         percentage: total > 0 ? (amount / total) * 100 : 0,
       };
-    }).filter((c) => c.amount > 0);
+    }).filter(c => c.amount > 0);
   }
 
   async getDREData(year: number, month: number): Promise<{ current: DREData; previous: DREData; percentageChange: { grossRevenue: number; netProfit: number } }> {
-    const receivables = Array.from(this.accountsReceivable.values());
-    const payables = Array.from(this.accountsPayable.values());
-    const categories = Array.from(this.categories.values());
+    const allReceivables = await db.select().from(accountsReceivable);
+    const allPayables = await db.select().from(accountsPayable);
+    const allCategories = await db.select().from(categories);
 
     const calculateDRE = (y: number, m: number): DREData => {
       const monthStart = new Date(y, m - 1, 1);
       const monthEnd = new Date(y, m, 0);
+      const startStr = monthStart.toISOString().split("T")[0];
+      const endStr = monthEnd.toISOString().split("T")[0];
 
-      const monthReceivables = receivables.filter((r) => {
-        const date = new Date((r.receivedDate || r.dueDate) + "T00:00:00");
-        return date >= monthStart && date <= monthEnd;
+      const monthReceivables = allReceivables.filter(r => {
+        const dateStr = r.receivedDate || r.dueDate;
+        return dateStr >= startStr && dateStr <= endStr;
       });
 
-      const monthPayables = payables.filter((p) => {
-        const date = new Date((p.paymentDate || p.dueDate) + "T00:00:00");
-        return date >= monthStart && date <= monthEnd;
+      const monthPayables = allPayables.filter(p => {
+        const dateStr = p.paymentDate || p.dueDate;
+        return dateStr >= startStr && dateStr <= endStr;
       });
 
       let grossRevenue = 0;
@@ -610,16 +549,16 @@ export class MemStorage implements IStorage {
       let costs = 0;
       let operationalExpenses = 0;
 
-      monthReceivables.forEach((r) => {
-        const cat = categories.find((c) => c.id === r.categoryId);
-        const amount = parseFloat(r.amount);
+      monthReceivables.forEach(r => {
+        const cat = allCategories.find(c => c.id === r.categoryId);
+        const amount = parseFloat(r.amount || "0");
         if (cat?.dreCategory === "revenue") grossRevenue += amount;
         if (cat?.dreCategory === "deductions") deductions += amount;
       });
 
-      monthPayables.forEach((p) => {
-        const cat = categories.find((c) => c.id === p.categoryId);
-        const amount = parseFloat(p.amount);
+      monthPayables.forEach(p => {
+        const cat = allCategories.find(c => c.id === p.categoryId);
+        const amount = parseFloat(p.amount || "0");
         if (cat?.dreCategory === "costs") costs += amount;
         if (cat?.dreCategory === "operational_expenses") operationalExpenses += amount;
       });
@@ -659,4 +598,4 @@ export class MemStorage implements IStorage {
   }
 }
 
-export const storage = new MemStorage();
+export const storage = new DatabaseStorage();
