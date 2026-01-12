@@ -2,6 +2,12 @@
 
 ## ⏱️ Tempo estimado: 15 minutos
 
+> 💡 **IMPORTANTE**: Este guia oferece duas opções de banco de dados:
+> - **Opção A**: PostgreSQL do Render (mais simples, tudo em um lugar)
+> - **Opção B**: Supabase (recomendado - melhor performance, interface visual, backups automáticos)
+> 
+> 📖 Para usar Supabase, consulte [GUIA-SUPABASE.md](./GUIA-SUPABASE.md) primeiro!
+
 ---
 
 ## 📋 PASSO 1: Preparar o Código

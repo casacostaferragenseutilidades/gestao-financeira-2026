@@ -75,14 +75,14 @@ Sistema completo de gestão financeira empresarial desenvolvido para o mercado b
 
 ### Pré-requisitos
 - Node.js 18+ 
-- PostgreSQL 14+
 - npm ou yarn
+- Conta no Supabase (gratuita) **OU** PostgreSQL 14+ local
 
 ### Configuração Local
 
 ```bash
 # Clone o repositório
-git clone https://github.com/SEU_USUARIO/gestao-financeira-2026.git
+git clone https://github.com/casacostaferragenseutilidades/gestao-financeira-2026.git
 cd gestao-financeira-2026
 
 # Instale as dependências
@@ -91,8 +91,35 @@ npm install
 # Configure as variáveis de ambiente
 cp .env.example .env
 # Edite o arquivo .env com suas configurações
+```
 
-# Execute as migrações do banco
+### 🗄️ Configurando o Banco de Dados
+
+#### Opção 1: Supabase (Recomendado - Gratuito)
+
+O Supabase oferece PostgreSQL gerenciado gratuitamente. **Siga o guia completo**: [GUIA-SUPABASE.md](./GUIA-SUPABASE.md)
+
+**Resumo rápido:**
+1. Crie uma conta em [supabase.com](https://supabase.com)
+2. Crie um novo projeto
+3. Copie a Connection String (modo Transaction, porta 6543)
+4. Cole no arquivo `.env` na variável `DATABASE_URL`
+
+#### Opção 2: PostgreSQL Local
+
+Se preferir usar PostgreSQL instalado localmente:
+```bash
+# Crie o banco de dados
+createdb gestao_financeira
+
+# Configure a URL no .env
+DATABASE_URL=postgresql://usuario:senha@localhost:5432/gestao_financeira
+```
+
+### 🚀 Iniciando a Aplicação
+
+```bash
+# Crie as tabelas no banco de dados
 npm run db:push
 
 # Inicie o servidor de desenvolvimento
@@ -101,26 +128,45 @@ npm run dev
 
 A aplicação estará disponível em `http://localhost:5001`
 
+**Credenciais padrão:**
+- Usuário: `admin`
+- Senha: `admin123`
+
 ## 🌐 Deploy
 
-Consulte o arquivo [DEPLOY.md](./DEPLOY.md) para instruções detalhadas de deploy em:
-- Render.com (Recomendado)
-- Railway.app
-- Vercel + Neon
+Consulte os guias de deploy:
+- **[GUIA-DEPLOY.md](./GUIA-DEPLOY.md)** - Deploy completo no Render.com (Recomendado)
+- **[DEPLOY.md](./DEPLOY.md)** - Outras opções (Railway, Vercel + Neon)
 
 ## 📝 Variáveis de Ambiente
 
+### Usando Supabase (Recomendado)
 ```env
-# Banco de Dados
-DATABASE_URL=postgresql://user:password@localhost:5432/gestao_financeira
+# Banco de Dados Supabase
+DATABASE_URL=postgresql://postgres.[PROJECT-REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres
 
 # Sessão
-SESSION_SECRET=sua-chave-secreta-aqui
+SESSION_SECRET=sua-chave-secreta-muito-forte-aqui
 
 # Ambiente
 NODE_ENV=development
 PORT=5001
 ```
+
+### Usando PostgreSQL Local
+```env
+# Banco de Dados Local
+DATABASE_URL=postgresql://usuario:senha@localhost:5432/gestao_financeira
+
+# Sessão
+SESSION_SECRET=sua-chave-secreta-muito-forte-aqui
+
+# Ambiente
+NODE_ENV=development
+PORT=5001
+```
+
+> 📖 **Guia completo de configuração**: [GUIA-SUPABASE.md](./GUIA-SUPABASE.md)
 
 ## 🔐 Primeiro Acesso
 
