@@ -91,9 +91,11 @@ export const accountsPayable = pgTable("accounts_payable", {
   costCenterId: varchar("cost_center_id"),
   paymentMethod: text("payment_method"), // 'boleto' | 'credit_card' | 'debit_card' | 'cash' | 'transfer' | 'pix'
   lateFees: decimal("late_fees", { precision: 15, scale: 2 }),
+  discount: decimal("discount", { precision: 15, scale: 2 }),
   notes: text("notes"),
   attachmentUrl: text("attachment_url"),
   recurrence: text("recurrence"), // 'none' | 'monthly' | 'weekly'
+  recurrenceEnd: text("recurrence_end"),
   active: boolean("active").notNull().default(true),
 });
 
@@ -116,6 +118,8 @@ export const accountsReceivable = pgTable("accounts_receivable", {
   discount: decimal("discount", { precision: 15, scale: 2 }),
   recurrence: text("recurrence"), // 'none' | 'monthly' | 'weekly' | 'yearly'
   recurrencePeriod: text("recurrence_period"), // Date string or number of occurrences (stored as text)
+  paymentMethod: text("payment_method"), // 'money', 'pix', 'credit_card', 'debit_card', 'boleto', 'transfer'
+  active: boolean("active").notNull().default(true),
 });
 
 export const insertAccountReceivableSchema = createInsertSchema(accountsReceivable).omit({ id: true });
@@ -162,6 +166,7 @@ export interface DashboardStats {
   overdueReceivables: number;
   dueTodayCount: number;
   dueThisWeekCount: number;
+  totalDiscounts: number;
 }
 
 export interface CashFlowData {
@@ -193,6 +198,12 @@ export interface DREData {
   icms: number; // Imposto sobre Circulação de Mercadorias e Serviços
   iss: number; // Imposto Sobre Serviços
   otherTaxes: number; // Outros tributos
+  depreciation: number;
+  amortization: number;
+  financialResult: number;
+  profitBeforeTax: number;
+  taxExpense: number;
+  netIncome: number;
 }
 
 export interface CategoryExpense {
@@ -259,7 +270,9 @@ export interface DailyMovement {
   subcategoryName?: string;
   amount: number;
   grossAmount?: number; // Valor bruto
-  fees?: number; // Taxas
+  lateFees?: number; // Juros/Multa
+  discount?: number; // Descontos
+  fees?: number; // Taxas (cartão, etc.)
   paymentMethod: string;
   account: string;
   status: 'confirmed' | 'pending' | 'overdue';
@@ -288,9 +301,47 @@ export interface CashFlowAlert {
   relatedId?: string;
 }
 
+// Notes (Anotações)
+export const notes = pgTable("notes", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  title: text("title").notNull(),
+  content: text("content"),
+  favorite: boolean("favorite").default(false),
+  color: text("color").default("default"), // 'default', 'red', 'green', 'blue', 'yellow', 'purple'
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertNoteSchema = createInsertSchema(notes).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertNote = z.infer<typeof insertNoteSchema>;
+export type Note = typeof notes.$inferSelect;
+
 // Sessions
 export const userSessions = pgTable("user_sessions", {
   sid: varchar("sid").primaryKey(),
   sess: text("sess").notNull(), // json stored as text/json
   expire: timestamp("expire", { precision: 6 }).notNull(),
 });
+
+// Financial Goals (Metas Financeiras)
+export const financialGoals = pgTable("financial_goals", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  name: text("name").notNull(),
+  type: text("type").notNull(), // 'income_total' | 'expense_total' | 'category'
+  targetAmount: decimal("target_amount", { precision: 15, scale: 2 }).notNull(),
+  month: integer("month").notNull(), // 1-12
+  year: integer("year").notNull(),
+  categoryId: varchar("category_id").references(() => categories.id),
+  active: boolean("active").notNull().default(true),
+  createdAt: timestamp("created_at").defaultNow(),
+});
+
+export const insertFinancialGoalSchema = createInsertSchema(financialGoals).omit({ id: true, createdAt: true });
+export type InsertFinancialGoal = z.infer<typeof insertFinancialGoalSchema>;
+export type FinancialGoal = typeof financialGoals.$inferSelect;
+
+export interface FinancialGoalProgress extends FinancialGoal {
+  currentAmount: number;
+  percentage: number;
+}
+

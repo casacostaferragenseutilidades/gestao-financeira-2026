@@ -4,6 +4,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import {
+  X,
   Plus,
   Search,
   Filter,
@@ -15,6 +16,7 @@ import {
   Calendar,
   Building2,
   TrendingUp,
+  TrendingDown,
   AlertTriangle,
   DollarSign,
   Clock,
@@ -24,6 +26,10 @@ import {
   Banknote,
   Wallet,
   Copy,
+  Mail,
+  Phone,
+  MapPin,
+  Search as SearchIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -79,18 +85,32 @@ const accountPayableFormSchema = z.object({
   amount: z.string().min(1, "Valor é obrigatório"),
   dueDate: z.string().min(1, "Data de vencimento é obrigatória"),
   lateFees: z.string().optional(),
+  discount: z.string().optional(),
   supplierId: z.string().min(1, "Fornecedor é obrigatório"),
   categoryId: z.string().min(1, "Categoria é obrigatória"),
   costCenterId: z.string().min(1, "Centro de Custo é obrigatório"),
   paymentMethod: z.string().min(1, "Meio de pagamento é obrigatório"),
   notes: z.string().optional(),
   recurrence: z.string().optional(),
+  recurrenceEnd: z.string().optional(),
 });
 
 type AccountPayableFormData = z.infer<typeof accountPayableFormSchema>;
 
+const supplierFormSchema = z.object({
+  name: z.string().min(1, "Nome é obrigatório"),
+  document: z.string().optional(),
+  email: z.string().email("E-mail inválido").optional().or(z.literal("")),
+  phone: z.string().optional(),
+  contact: z.string().optional(),
+  address: z.string().optional(),
+});
+
+type SupplierFormData = z.infer<typeof supplierFormSchema>;
+
 const paymentFormSchema = z.object({
   lateFees: z.string().optional(),
+  discount: z.string().optional(),
   paymentDate: z.string().min(1, "Data de pagamento é obrigatória"),
 });
 
@@ -105,6 +125,7 @@ export default function AccountsPayable() {
   const [dateFilter, setDateFilter] = useState<{ start: string; end: string }>({ start: "", end: "" });
   const [paymentDialogOpen, setPaymentDialogOpen] = useState(false);
   const [accountToPay, setAccountToPay] = useState<AccountPayable | null>(null);
+  const [newSupplierDialogOpen, setNewSupplierDialogOpen] = useState(false);
   const { toast } = useToast();
 
   const { data: accounts, isLoading } = useQuery<AccountPayable[]>({
@@ -134,8 +155,10 @@ export default function AccountsPayable() {
       costCenterId: "",
       paymentMethod: "",
       lateFees: "",
+      discount: "",
       notes: "",
       recurrence: "none",
+      recurrenceEnd: "",
     },
   });
 
@@ -143,9 +166,79 @@ export default function AccountsPayable() {
     resolver: zodResolver(paymentFormSchema),
     defaultValues: {
       lateFees: "",
+      discount: "",
       paymentDate: new Date().toISOString().split("T")[0],
     },
   });
+
+  const supplierForm = useForm<SupplierFormData>({
+    resolver: zodResolver(supplierFormSchema),
+    defaultValues: {
+      name: "",
+      document: "",
+      email: "",
+      phone: "",
+      contact: "",
+      address: "",
+    },
+  });
+
+  const createSupplierMutation = useMutation({
+    mutationFn: async (data: SupplierFormData) => {
+      const res = await apiRequest("POST", "/api/suppliers", data);
+      return await res.json() as Supplier;
+    },
+    onSuccess: (newSupplier) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/suppliers"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/accounts-payable"] });
+      setNewSupplierDialogOpen(false);
+      supplierForm.reset();
+      toast({
+        title: "Sucesso",
+        description: "Fornecedor cadastrado com sucesso.",
+      });
+      if (newSupplier && newSupplier.id) {
+        form.setValue("supplierId", newSupplier.id);
+      }
+    },
+    onError: () => {
+      toast({
+        title: "Erro",
+        description: "Não foi possível cadastrar o fornecedor.",
+        variant: "destructive",
+      });
+    },
+  });
+
+  const searchCNPJ = async (cnpj: string) => {
+    try {
+      const cleanCNPJ = cnpj.replace(/[^\d]/g, '');
+      if (cleanCNPJ.length !== 14) return;
+
+      const response = await fetch(`https://publica.cnpj.ws/cnpj/${cleanCNPJ}`);
+      if (!response.ok) return;
+
+      const data = await response.json();
+
+      if (data.estabelecimento) {
+        supplierForm.setValue('name', data.estabelecimento.nome_fantasia || data.estabelecimento.nome_empresarial || '');
+        supplierForm.setValue('email', data.estabelecimento.email || '');
+        supplierForm.setValue('phone', data.estabelecimento.ddd1 + data.estabelecimento.telefone1 || '');
+        supplierForm.setValue('address', `${data.estabelecimento.tipo_logradouro || ''} ${data.estabelecimento.logradouro || ''}, ${data.estabelecimento.numero || ''}, ${data.estabelecimento.bairro || ''}, ${data.estabelecimento.municipio || ''} - ${data.estabelecimento.uf || ''}`.trim());
+
+        toast({
+          title: "Dados encontrados",
+          description: "Informações do CNPJ foram preenchidas automaticamente.",
+        });
+      }
+    } catch (error) {
+      toast({
+        title: "Erro na busca",
+        description: "Não foi possível buscar os dados do CNPJ.",
+        variant: "destructive",
+      });
+    }
+  };
 
   const createMutation = useMutation({
     mutationFn: (data: AccountPayableFormData) =>
@@ -157,6 +250,9 @@ export default function AccountsPayable() {
         costCenterId: data.costCenterId || null,
         paymentMethod: data.paymentMethod || null,
         lateFees: data.lateFees || null,
+        discount: data.discount || null,
+        recurrence: data.recurrence || null,
+        recurrenceEnd: data.recurrence === "none" ? null : data.recurrenceEnd,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/accounts-payable"] });
@@ -187,6 +283,9 @@ export default function AccountsPayable() {
         costCenterId: data.costCenterId || null,
         paymentMethod: data.paymentMethod || null,
         lateFees: data.lateFees || null,
+        discount: data.discount || null,
+        recurrence: data.recurrence || null,
+        recurrenceEnd: data.recurrence === "none" ? null : data.recurrenceEnd,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/accounts-payable"] });
@@ -229,10 +328,11 @@ export default function AccountsPayable() {
   });
 
   const markAsPaidMutation = useMutation({
-    mutationFn: (data: { id: string; lateFees?: string; paymentDate: string }) =>
+    mutationFn: (data: { id: string; lateFees?: string; discount?: string; paymentDate: string }) =>
       apiRequest("PATCH", `/api/accounts-payable/${data.id}/pay`, {
         paymentDate: data.paymentDate,
         lateFees: data.lateFees || null,
+        discount: data.discount || null,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/accounts-payable"] });
@@ -267,6 +367,7 @@ export default function AccountsPayable() {
       markAsPaidMutation.mutate({
         id: accountToPay.id,
         lateFees: data.lateFees,
+        discount: data.discount,
         paymentDate: data.paymentDate,
       });
     }
@@ -276,6 +377,7 @@ export default function AccountsPayable() {
     setAccountToPay(account);
     paymentForm.reset({
       lateFees: account.lateFees || "",
+      discount: account.discount || "",
       paymentDate: new Date().toISOString().split("T")[0],
     });
     setPaymentDialogOpen(true);
@@ -300,8 +402,10 @@ export default function AccountsPayable() {
       costCenterId: account.costCenterId || "",
       paymentMethod: account.paymentMethod || "",
       lateFees: account.lateFees || "",
+      discount: account.discount || "",
       notes: account.notes || "",
       recurrence: account.recurrence || "none",
+      recurrenceEnd: account.recurrenceEnd || "",
     });
     setIsOpen(true);
   };
@@ -316,10 +420,12 @@ export default function AccountsPayable() {
       costCenterId: account.costCenterId || "",
       paymentMethod: account.paymentMethod || "",
       lateFees: account.lateFees || "",
+      discount: account.discount || "",
       notes: account.notes || "",
       recurrence: account.recurrence || "none",
+      recurrenceEnd: account.recurrenceEnd || "",
     };
-    
+
     form.reset(clonedAccount);
     setIsOpen(true);
   };
@@ -333,42 +439,49 @@ export default function AccountsPayable() {
   };
 
   const filteredAccounts = accounts?.filter((account) => {
-    const matchesSearch = account.description.toLowerCase().includes(searchTerm.toLowerCase());
+    const term = searchTerm.toLowerCase();
+
+    const supplierName = suppliers?.find(s => s.id === account.supplierId)?.name || "";
+    const categoryName = categories?.find(c => c.id === account.categoryId)?.name || "";
+    const costCenterName = costCenters?.find(cc => cc.id === account.costCenterId)?.name || "";
+
+    const matchesSearch =
+      account.description.toLowerCase().includes(term) ||
+      account.amount.toString().includes(term) ||
+      formatCurrency(account.amount).toLowerCase().includes(term) ||
+      (account.notes || "").toLowerCase().includes(term) ||
+      supplierName.toLowerCase().includes(term) ||
+      categoryName.toLowerCase().includes(term) ||
+      costCenterName.toLowerCase().includes(term);
+
     const isOverdueAccount = isOverdue(account.dueDate, account.status);
     const displayStatus = isOverdueAccount ? "overdue" : account.status;
-    
+
     const matchesStatus = statusFilter === "all" || displayStatus === statusFilter;
     const matchesActive = activeFilter === "all" || (activeFilter === "active" && account.active !== false) || (activeFilter === "inactive" && account.active === false);
-    
+
     // Date range filter
     const matchesDateRange = (!dateFilter.start || account.dueDate >= dateFilter.start) &&
-                             (!dateFilter.end || account.dueDate <= dateFilter.end);
-    
+      (!dateFilter.end || account.dueDate <= dateFilter.end);
+
     return matchesSearch && matchesStatus && matchesActive && matchesDateRange;
   }).sort((a, b) => new Date(a.dueDate).getTime() - new Date(b.dueDate).getTime()) || [];
 
-  // Calculate statistics
-  const stats = accounts ? {
-    total: accounts.reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
-    pending: accounts.filter(acc => acc.status === "pending").reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
-    paid: accounts.filter(acc => acc.status === "paid").reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
-    overdue: accounts.filter(acc => isOverdue(acc.dueDate, acc.status)).reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
-    overdueCount: accounts.filter(acc => isOverdue(acc.dueDate, acc.status)).length,
-    pendingCount: accounts.filter(acc => acc.status === "pending").length,
-    paidCount: accounts.filter(acc => acc.status === "paid").length,
-    totalLateFees: accounts.reduce((sum, acc) => sum + (acc.lateFees && acc.lateFees !== null ? parseFloat(acc.lateFees) : 0), 0),
-  } : {
-    total: 0,
-    pending: 0,
-    paid: 0,
-    overdue: 0,
-    overdueCount: 0,
-    pendingCount: 0,
-    paidCount: 0,
-    totalLateFees: 0,
+  // Calculate statistics based on filtered accounts
+  const stats = {
+    total: filteredAccounts.reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
+    pending: filteredAccounts.filter(acc => acc.status === "pending").reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
+    paid: filteredAccounts.filter(acc => acc.status === "paid").reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
+    overdue: filteredAccounts.filter(acc => isOverdue(acc.dueDate, acc.status)).reduce((sum, acc) => sum + parseFloat(acc.amount), 0),
+    overdueCount: filteredAccounts.filter(acc => isOverdue(acc.dueDate, acc.status)).length,
+    pendingCount: filteredAccounts.filter(acc => acc.status === "pending").length,
+    paidCount: filteredAccounts.filter(acc => acc.status === "paid").length,
+    totalLateFees: filteredAccounts.reduce((sum, acc) => sum + (acc.lateFees && acc.lateFees !== null ? parseFloat(acc.lateFees) : 0), 0),
+    totalDiscount: filteredAccounts.reduce((sum, acc) => sum + (acc.discount && acc.discount !== null ? parseFloat(acc.discount) : 0), 0),
   };
 
   const expenseCategories = categories?.filter((c) => c.type === "expense");
+  const recurrence = form.watch("recurrence");
 
   return (
     <div className="p-6 space-y-6">
@@ -398,8 +511,8 @@ export default function AccountsPayable() {
             <Form {...form}>
               <form onSubmit={form.handleSubmit(handleSubmit)} className="space-y-6">
                 {/* Main Information Section */}
-                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 p-4 rounded-lg border border-blue-200">
-                  <h3 className="text-lg font-semibold text-blue-900 mb-4 flex items-center gap-2">
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950 dark:to-indigo-900 p-4 rounded-lg border border-blue-200 dark:border-blue-800">
+                  <h3 className="text-lg font-semibold text-blue-900 dark:text-blue-100 mb-4 flex items-center gap-2">
                     <FileText className="h-5 w-5" />
                     Informações Principais
                   </h3>
@@ -478,11 +591,31 @@ export default function AccountsPayable() {
                       )}
                     />
                   </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
+                    <FormField
+                      control={form.control}
+                      name="discount"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel className="text-blue-900 font-medium">Desconto Previsto</FormLabel>
+                          <FormControl>
+                            <Input
+                              type="number"
+                              step="0.01"
+                              placeholder="0,00"
+                              {...field}
+                              className="bg-white border-blue-300"
+                            />
+                          </FormControl>
+                          <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+                  </div>
                 </div>
 
-                {/* Financial Details Section */}
-                <div className="bg-gradient-to-r from-green-50 to-emerald-50 p-4 rounded-lg border border-green-200">
-                  <h3 className="text-lg font-semibold text-green-900 mb-4 flex items-center gap-2">
+                <div className="bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-950 dark:to-emerald-900 p-4 rounded-lg border border-green-200 dark:border-green-800">
+                  <h3 className="text-lg font-semibold text-green-900 dark:text-green-100 mb-4 flex items-center gap-2">
                     <DollarSign className="h-5 w-5" />
                     Detalhes Financeiros
                   </h3>
@@ -493,20 +626,32 @@ export default function AccountsPayable() {
                       render={({ field }) => (
                         <FormItem>
                           <FormLabel className="text-green-900 font-medium">Fornecedor *</FormLabel>
-                          <Select onValueChange={field.onChange} value={field.value}>
-                            <FormControl>
-                              <SelectTrigger data-testid="select-supplier" className="bg-white border-green-300">
-                                <SelectValue placeholder="Selecione um fornecedor" />
-                              </SelectTrigger>
-                            </FormControl>
-                            <SelectContent>
-                              {suppliers?.map((supplier) => (
-                                <SelectItem key={supplier.id} value={supplier.id}>
-                                  {supplier.name}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
+                          <div className="flex gap-2">
+                            <Select onValueChange={field.onChange} value={field.value}>
+                              <FormControl>
+                                <SelectTrigger data-testid="select-supplier" className="bg-white border-green-300 flex-1">
+                                  <SelectValue placeholder="Selecione um fornecedor" />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                {suppliers?.map((supplier) => (
+                                  <SelectItem key={supplier.id} value={supplier.id}>
+                                    {supplier.name}
+                                  </SelectItem>
+                                ))}
+                              </SelectContent>
+                            </Select>
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="icon"
+                              className="border-green-300 hover:bg-green-50"
+                              onClick={() => setNewSupplierDialogOpen(true)}
+                              title="Cadastrar Novo Fornecedor"
+                            >
+                              <Plus className="h-4 w-4 text-green-700" />
+                            </Button>
+                          </div>
                           <FormMessage />
                         </FormItem>
                       )}
@@ -562,9 +707,8 @@ export default function AccountsPayable() {
                   </div>
                 </div>
 
-                {/* Additional Information Section */}
-                <div className="bg-gradient-to-r from-purple-50 to-violet-50 p-4 rounded-lg border border-purple-200">
-                  <h3 className="text-lg font-semibold text-purple-900 mb-4 flex items-center gap-2">
+                <div className="bg-gradient-to-r from-purple-50 to-violet-50 dark:from-purple-950 dark:to-violet-900 p-4 rounded-lg border border-purple-200 dark:border-purple-800">
+                  <h3 className="text-lg font-semibold text-purple-900 dark:text-purple-100 mb-4 flex items-center gap-2">
                     <Calendar className="h-5 w-5" />
                     Informações Adicionais
                   </h3>
@@ -640,12 +784,28 @@ export default function AccountsPayable() {
                               <SelectItem value="none">Sem recorrência</SelectItem>
                               <SelectItem value="weekly">Semanal</SelectItem>
                               <SelectItem value="monthly">Mensal</SelectItem>
+                              <SelectItem value="yearly">Anual</SelectItem>
                             </SelectContent>
                           </Select>
                           <FormMessage />
                         </FormItem>
                       )}
                     />
+                    {recurrence && recurrence !== "none" && (
+                      <FormField
+                        control={form.control}
+                        name="recurrenceEnd"
+                        render={({ field }) => (
+                          <FormItem className="animate-in fade-in slide-in-from-top-1 duration-200">
+                            <FormLabel className="text-purple-900 font-medium">Até Quando? *</FormLabel>
+                            <FormControl>
+                              <Input type="date" {...field} className="bg-white border-purple-300" />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
                   </div>
                   <FormField
                     control={form.control}
@@ -686,8 +846,8 @@ export default function AccountsPayable() {
                     {createMutation.isPending || updateMutation.isPending
                       ? "Salvando..."
                       : editingAccount
-                      ? "Atualizar"
-                      : "Cadastrar"}
+                        ? "Atualizar"
+                        : "Cadastrar"}
                   </Button>
                 </DialogFooter>
               </form>
@@ -695,6 +855,101 @@ export default function AccountsPayable() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* New Supplier Dialog */}
+      <Dialog open={newSupplierDialogOpen} onOpenChange={setNewSupplierDialogOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Novo Fornecedor</DialogTitle>
+            <DialogDescription>
+              Cadastre um novo fornecedor rapidamente
+            </DialogDescription>
+          </DialogHeader>
+          <Form {...supplierForm}>
+            <form onSubmit={supplierForm.handleSubmit((data) => createSupplierMutation.mutate(data))} className="space-y-4">
+              <FormField
+                control={supplierForm.control}
+                name="name"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Nome *</FormLabel>
+                    <FormControl>
+                      <Input placeholder="Nome do fornecedor" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={supplierForm.control}
+                name="document"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>CNPJ/CPF</FormLabel>
+                    <FormControl>
+                      <div className="flex gap-2">
+                        <Input placeholder="00.000.000/0000-00" {...field} />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => searchCNPJ(field.value || "")}
+                          disabled={!field.value || field.value.replace(/[^\d]/g, '').length !== 14}
+                        >
+                          <SearchIcon className="h-4 w-4" />
+                        </Button>
+                      </div>
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <div className="grid grid-cols-2 gap-4">
+                <FormField
+                  control={supplierForm.control}
+                  name="email"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>E-mail</FormLabel>
+                      <FormControl>
+                        <Input type="email" placeholder="email@exemplo.com" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={supplierForm.control}
+                  name="phone"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Telefone</FormLabel>
+                      <FormControl>
+                        <Input placeholder="(00) 00000-0000" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setNewSupplierDialogOpen(false)}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={createSupplierMutation.isPending}
+                >
+                  {createSupplierMutation.isPending ? "Salvando..." : "Cadastrar"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
 
       {/* Payment Dialog */}
       <Dialog open={paymentDialogOpen} onOpenChange={handlePaymentDialogOpenChange}>
@@ -720,7 +975,7 @@ export default function AccountsPayable() {
                   <p>Data de vencimento: <strong>{accountToPay && formatDate(accountToPay.dueDate)}</strong></p>
                 </div>
               </div>
-              
+
               <FormField
                 control={paymentForm.control}
                 name="paymentDate"
@@ -734,13 +989,33 @@ export default function AccountsPayable() {
                   </FormItem>
                 )}
               />
-              
+
               <FormField
                 control={paymentForm.control}
                 name="lateFees"
                 render={({ field }) => (
                   <FormItem>
                     <FormLabel>Juros / Multa (se aplicável)</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="number"
+                        step="0.01"
+                        placeholder="0,00"
+                        {...field}
+                        className="bg-white"
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={paymentForm.control}
+                name="discount"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Desconto (se aplicável)</FormLabel>
                     <FormControl>
                       <Input
                         type="number"
@@ -780,68 +1055,81 @@ export default function AccountsPayable() {
       </Dialog>
 
       {/* Statistics Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
-        <Card className="bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200">
+      <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+        <Card className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950 dark:to-blue-900 border-blue-200 dark:border-blue-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-blue-600">Total</p>
-                <p className="text-2xl font-bold text-blue-900">{formatCurrency(stats.total)}</p>
-                <p className="text-xs text-blue-600 mt-1">{accounts?.length || 0} contas</p>
+                <p className="text-sm font-medium text-blue-600 dark:text-blue-400">Total</p>
+                <p className="text-2xl font-bold text-blue-900 dark:text-blue-100">{formatCurrency(stats.total)}</p>
+                <p className="text-xs text-blue-600 dark:text-blue-400 mt-1">{filteredAccounts.length} contas</p>
               </div>
-              <DollarSign className="h-8 w-8 text-blue-500" />
+              <DollarSign className="h-8 w-8 text-blue-500 dark:text-blue-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-orange-50 to-orange-100 border-orange-200">
+        <Card className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-950 dark:to-orange-900 border-orange-200 dark:border-orange-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-orange-600">Pendentes</p>
-                <p className="text-2xl font-bold text-orange-900">{formatCurrency(stats.pending)}</p>
-                <p className="text-xs text-orange-600 mt-1">{stats.pendingCount} contas</p>
+                <p className="text-sm font-medium text-orange-600 dark:text-orange-400">Pendentes</p>
+                <p className="text-2xl font-bold text-orange-900 dark:text-orange-100">{formatCurrency(stats.pending)}</p>
+                <p className="text-xs text-orange-600 dark:text-orange-400 mt-1">{stats.pendingCount} contas</p>
               </div>
-              <Clock className="h-8 w-8 text-orange-500" />
+              <Clock className="h-8 w-8 text-orange-500 dark:text-orange-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-green-50 to-green-100 border-green-200">
+        <Card className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-950 dark:to-green-900 border-green-200 dark:border-green-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-green-600">Pagos</p>
-                <p className="text-2xl font-bold text-green-900">{formatCurrency(stats.paid)}</p>
-                <p className="text-xs text-green-600 mt-1">{stats.paidCount} contas</p>
+                <p className="text-sm font-medium text-green-600 dark:text-green-400">Pagos</p>
+                <p className="text-2xl font-bold text-green-900 dark:text-green-100">{formatCurrency(stats.paid)}</p>
+                <p className="text-xs text-green-600 dark:text-green-400 mt-1">{stats.paidCount} contas</p>
               </div>
-              <CheckCircle className="h-8 w-8 text-green-500" />
+              <CheckCircle className="h-8 w-8 text-green-500 dark:text-green-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-red-50 to-red-100 border-red-200">
+        <Card className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-950 dark:to-red-900 border-red-200 dark:border-red-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-red-600">Vencidos</p>
-                <p className="text-2xl font-bold text-red-900">{formatCurrency(stats.overdue)}</p>
-                <p className="text-xs text-red-600 mt-1">{stats.overdueCount} contas</p>
+                <p className="text-sm font-medium text-red-600 dark:text-red-400">Vencidos</p>
+                <p className="text-2xl font-bold text-red-900 dark:text-red-100">{formatCurrency(stats.overdue)}</p>
+                <p className="text-xs text-red-600 dark:text-red-400 mt-1">{stats.overdueCount} contas</p>
               </div>
-              <AlertTriangle className="h-8 w-8 text-red-500" />
+              <AlertTriangle className="h-8 w-8 text-red-500 dark:text-red-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-purple-50 to-purple-100 border-purple-200">
+        <Card className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-950 dark:to-purple-900 border-purple-200 dark:border-purple-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-purple-600">Juros/Multa</p>
-                <p className="text-2xl font-bold text-purple-900">{formatCurrency(stats.totalLateFees)}</p>
-                <p className="text-xs text-purple-600 mt-1">Valor total registrado</p>
+                <p className="text-sm font-medium text-purple-600 dark:text-purple-400">Juros/Multa</p>
+                <p className="text-2xl font-bold text-purple-900 dark:text-purple-100">{formatCurrency(stats.totalLateFees)}</p>
+                <p className="text-xs text-purple-600 dark:text-purple-400 mt-1">Acréscimos totais</p>
               </div>
-              <Percent className="h-8 w-8 text-purple-500" />
+              <Percent className="h-8 w-8 text-purple-500 dark:text-purple-400" />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="bg-gradient-to-br from-teal-50 to-teal-100 dark:from-teal-950 dark:to-teal-900 border-teal-200 dark:border-teal-800">
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-sm font-medium text-teal-600 dark:text-teal-400">Descontos</p>
+                <p className="text-2xl font-bold text-teal-900 dark:text-teal-100">{formatCurrency(stats.totalDiscount)}</p>
+                <p className="text-xs text-teal-600 dark:text-teal-400 mt-1">Economia total</p>
+              </div>
+              <TrendingDown className="h-8 w-8 text-teal-500 dark:text-teal-400" />
             </div>
           </CardContent>
         </Card>
@@ -851,7 +1139,7 @@ export default function AccountsPayable() {
         <CardHeader>
           <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between mb-6">
             <div>
-              <h1 className="text-3xl font-bold text-gray-900">Contas a Pagar</h1>
+              <h1 className="text-3xl font-bold text-gray-900 dark:text-foreground">Contas a Pagar</h1>
               <p className="text-gray-600 mt-1">Gerencie suas contas e pagamentos</p>
             </div>
             <Button
@@ -868,7 +1156,7 @@ export default function AccountsPayable() {
             </Button>
           </div>
 
-          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-200 mb-6">
+          <div className="bg-white dark:bg-card p-4 rounded-lg shadow-sm border border-gray-200 dark:border-border mb-6">
             <div className="flex flex-col lg:flex-row gap-4">
               <div className="flex-1">
                 <div className="relative">
@@ -906,21 +1194,41 @@ export default function AccountsPayable() {
                 </Select>
               </div>
               <div className="flex items-center gap-2">
-                <Input
-                  type="date"
-                  placeholder="Data Início"
-                  value={dateFilter.start}
-                  onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))}
-                  className="w-[150px]"
-                />
-                <span className="text-sm text-muted-foreground">até</span>
-                <Input
-                  type="date"
-                  placeholder="Data Fim"
-                  value={dateFilter.end}
-                  onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))}
-                  className="w-[150px]"
-                />
+                <div className="flex flex-col">
+                  <span className="text-[10px] text-muted-foreground mb-1 ml-1">Vencimento Início</span>
+                  <Input
+                    type="date"
+                    value={dateFilter.start}
+                    onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))}
+                    className="w-[140px]"
+                  />
+                </div>
+                <span className="text-sm text-muted-foreground pt-5">até</span>
+                <div className="flex flex-col">
+                  <span className="text-[10px] text-muted-foreground mb-1 ml-1">Vencimento Fim</span>
+                  <Input
+                    type="date"
+                    value={dateFilter.end}
+                    onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))}
+                    className="w-[140px]"
+                  />
+                </div>
+                {(searchTerm || statusFilter !== "all" || activeFilter !== "active" || dateFilter.start || dateFilter.end) && (
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      setSearchTerm("");
+                      setStatusFilter("all");
+                      setActiveFilter("active");
+                      setDateFilter({ start: "", end: "" });
+                    }}
+                    title="Limpar filtros"
+                    className="mt-4"
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                )}
               </div>
             </div>
           </div>
@@ -943,6 +1251,8 @@ export default function AccountsPayable() {
                     <TableHead>Vencimento</TableHead>
                     <TableHead className="text-right">Valor</TableHead>
                     <TableHead className="text-right">Juros/Multa</TableHead>
+                    <TableHead className="text-right">Desconto</TableHead>
+                    <TableHead className="text-right font-bold">Valor Líquido</TableHead>
                     <TableHead>Data Pagamento</TableHead>
                     <TableHead>Status</TableHead>
                     <TableHead className="w-[50px]"></TableHead>
@@ -954,6 +1264,10 @@ export default function AccountsPayable() {
                     const category = categories?.find((c) => c.id === account.categoryId);
                     const overdue = isOverdue(account.dueDate, account.status);
                     const displayStatus = overdue ? "overdue" : account.status;
+                    const amountNum = parseFloat(account.amount?.toString() || "0");
+                    const lateFeesNum = parseFloat(account.lateFees?.toString() || "0");
+                    const discountNum = parseFloat(account.discount?.toString() || "0");
+                    const netValue = amountNum + lateFeesNum - discountNum;
 
                     return (
                       <TableRow key={account.id} data-testid={`row-payable-${account.id}`}>
@@ -996,6 +1310,18 @@ export default function AccountsPayable() {
                           ) : (
                             <span className="text-muted-foreground">-</span>
                           )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          {account.discount && account.discount !== null ? (
+                            <span className="text-green-600 font-medium">
+                              {formatCurrency(account.discount)}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">-</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right font-bold">
+                          {formatCurrency(netValue.toFixed(2))}
                         </TableCell>
                         <TableCell>
                           {account.paymentDate ? (

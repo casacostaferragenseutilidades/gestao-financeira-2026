@@ -47,26 +47,51 @@ import {
   Legend,
 } from "recharts";
 import { formatCurrency, formatDate } from "@/lib/utils";
-import type { CashFlowData, CashFlowKPIs, CashFlowAlert, DailyMovement } from "@shared/schema";
+import type { CashFlowData, CashFlowKPIs, CashFlowAlert, DailyMovement, CashFlowSummary, Category } from "@shared/schema";
 
 export default function CashFlow() {
   const [isDialogOpen, setIsDialogOpen] = useState(false);
-  const [period, setPeriod] = useState("daily");
+  const [period, setPeriod] = useState("monthly");
   const [startDate, setStartDate] = useState(() => {
     const date = new Date();
-    date.setDate(date.getDate() - 7);
-    return date.toISOString().split("T")[0];
+    return new Date(date.getFullYear(), date.getMonth(), 1).toISOString().split("T")[0];
   });
   const [endDate, setEndDate] = useState(() => {
     const date = new Date();
-    date.setDate(date.getDate() + 7);
-    return date.toISOString().split("T")[0];
+    return new Date(date.getFullYear(), date.getMonth() + 1, 0).toISOString().split("T")[0];
   });
-  const [useDateRange, setUseDateRange] = useState(false);
+  const [useDateRange, setUseDateRange] = useState(true);
   const [activeTab, setActiveTab] = useState("transaction");
   const [transactionType, setTransactionType] = useState<"income" | "expense">("expense");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const queryClient = useQueryClient();
+
+  // Estados para o relatório mensal detalhado
+  const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth());
+  const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
+
+  const getMonthlyDateRange = () => {
+    const start = new Date(selectedYear, selectedMonth, 1);
+    const end = new Date(selectedYear, selectedMonth + 1, 0);
+    return {
+      start: start.toISOString().split('T')[0],
+      end: end.toISOString().split('T')[0]
+    };
+  };
+
+  const { start: monthlyStartDate, end: monthlyEndDate } = getMonthlyDateRange();
+
+  const { data: monthlyMovements, isLoading: monthlyLoading } = useQuery<DailyMovement[]>({
+    queryKey: ["/api/cash-flow/movements", { startDate: monthlyStartDate, endDate: monthlyEndDate, type: "monthly-report" }],
+    queryFn: async () => {
+      const params = new URLSearchParams();
+      params.append('startDate', monthlyStartDate);
+      params.append('endDate', monthlyEndDate);
+      const response = await fetch(`/api/cash-flow/movements?${params}`);
+      if (!response.ok) throw new Error("Erro ao buscar movimentações mensais");
+      return response.json();
+    },
+  });
 
   const { data: cashFlowData, isLoading } = useQuery<CashFlowData[]>({
     queryKey: ["/api/cash-flow", useDateRange ? { startDate, endDate } : period],
@@ -136,7 +161,7 @@ export default function CashFlow() {
     },
   });
 
-  const { data: categories } = useQuery({
+  const { data: categories } = useQuery<Category[]>({
     queryKey: ["/api/categories"],
   });
 
@@ -148,9 +173,9 @@ export default function CashFlow() {
       description: string;
       categoryId: string;
       subcategoryId?: string;
-      amount: number;
-      grossAmount?: number;
-      fees?: number;
+      amount: number | string;
+      grossAmount?: number | string;
+      fees?: number | string;
       paymentMethod: string;
       account: string;
       status: 'confirmed' | 'pending' | 'overdue';
@@ -160,10 +185,17 @@ export default function CashFlow() {
       dueDate?: string;
       actualDate?: string;
     }) => {
+      const entryData = {
+        ...entry,
+        amount: entry.amount.toString(),
+        grossAmount: entry.grossAmount?.toString(),
+        fees: entry.fees?.toString(),
+      };
+
       const response = await fetch("/api/cash-flow/entries", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(entry),
+        body: JSON.stringify(entryData),
       });
       if (!response.ok) throw new Error("Erro ao criar movimentação");
       return response.json();
@@ -183,13 +215,17 @@ export default function CashFlow() {
       date: string;
       balanceType: 'initial' | 'final';
       description: string;
-      amount: number;
+      amount: number | string;
       account: string;
     }) => {
+      const adjustmentData = {
+        ...entry,
+        amount: entry.amount.toString(),
+      };
       const response = await fetch("/api/balance-adjustments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(entry),
+        body: JSON.stringify(adjustmentData),
       });
       if (!response.ok) throw new Error("Erro ao criar ajuste de saldo");
       return response.json();
@@ -262,6 +298,395 @@ export default function CashFlow() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
+            <DialogTrigger asChild>
+              <Button size="sm" className="flex items-center gap-2 mr-2 bg-green-600 hover:bg-green-700 text-white border-none shadow-sm">
+                <Plus className="h-4 w-4" />
+                Nova Movimentação
+              </Button>
+            </DialogTrigger>
+            <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto" aria-describedby={undefined}>
+              <DialogHeader>
+                <DialogTitle>Lançamento Financeiro</DialogTitle>
+              </DialogHeader>
+
+              <Tabs defaultValue="transaction" className="w-full" onValueChange={(val) => setActiveTab(val)}>
+                <TabsList className="grid w-full grid-cols-2 mb-4">
+                  <TabsTrigger value="transaction">Movimentação</TabsTrigger>
+                  <TabsTrigger value="adjustment">Ajuste de Saldo</TabsTrigger>
+                </TabsList>
+
+                <TabsContent value="transaction" className="space-y-4">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const formData = new FormData(e.currentTarget);
+
+                      const entry = {
+                        date: formData.get("date") as string,
+                        competenceDate: formData.get("competenceDate") as string || undefined,
+                        type: transactionType,
+                        movementType: "normal" as const,
+                        description: formData.get("description") as string,
+                        categoryId: formData.get("categoryId") as string,
+                        subcategoryId: formData.get("subcategoryId") as string || undefined,
+                        amount: parseFloat(formData.get("amount") as string) || 0,
+                        grossAmount: (formData.get("grossAmount") && formData.get("grossAmount") !== "") ? (parseFloat(formData.get("grossAmount") as string) || 0) : undefined,
+                        fees: (formData.get("fees") && formData.get("fees") !== "") ? (parseFloat(formData.get("fees") as string) || 0) : undefined,
+                        paymentMethod: formData.get("paymentMethod") as string,
+                        account: formData.get("account") as string,
+                        status: formData.get("status") as 'confirmed' | 'pending' | 'overdue',
+                        document: formData.get("document") as string || undefined,
+                        costCenter: formData.get("costCenter") as string || undefined,
+                        recurrence: formData.get("recurrence") as string || undefined,
+                        dueDate: formData.get("dueDate") as string || undefined,
+                        actualDate: formData.get("actualDate") as string || undefined,
+                      };
+                      console.log("Final entry object being mutated:", entry);
+                      createEntryMutation.mutate(entry);
+                    }}
+                    className="space-y-4"
+                  >
+                    {/* Transaction Type Toggle */}
+                    <div className="flex gap-2 p-1 bg-muted rounded-lg">
+                      <Button
+                        type="button"
+                        variant={transactionType === 'income' ? 'default' : 'ghost'}
+                        className={`flex-1 ${transactionType === 'income' ? 'bg-green-600 hover:bg-green-700 text-white' : ''}`}
+                        onClick={() => setTransactionType('income')}
+                      >
+                        <TrendingUp className="mr-2 h-4 w-4" />
+                        Entrada
+                      </Button>
+                      <Button
+                        type="button"
+                        variant={transactionType === 'expense' ? 'default' : 'ghost'}
+                        className={`flex-1 ${transactionType === 'expense' ? 'bg-red-600 hover:bg-red-700 text-white' : ''}`}
+                        onClick={() => setTransactionType('expense')}
+                      >
+                        <TrendingDown className="mr-2 h-4 w-4" />
+                        Saída
+                      </Button>
+                    </div>
+
+                    {/* Amount */}
+                    <div>
+                      <Label htmlFor="amount" className="text-sm font-medium text-muted-foreground">Valor (R$)</Label>
+                      <Input
+                        id="amount"
+                        name="amount"
+                        type="number"
+                        step="0.01"
+                        placeholder="0,00"
+                        className="text-2xl font-bold h-12"
+                        required
+                        autoFocus
+                      />
+                    </div>
+
+                    {/* Description */}
+                    <div>
+                      <Label htmlFor="description">Descrição</Label>
+                      <Input
+                        id="description"
+                        name="description"
+                        placeholder={transactionType === 'income' ? "Ex: Venda de Serviços, Reembolso" : "Ex: Conta de Luz, Material de Escritório"}
+                        required
+                      />
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <Select name="categoryId" onValueChange={(val) => {
+                          const input = document.getElementById('categoryId-input') as HTMLInputElement;
+                          if (input) input.value = val;
+                        }} required>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Selecione" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {categories?.filter(c => c.type === transactionType).map((category) => (
+                              <SelectItem key={category.id} value={category.id}>
+                                {category.name}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <input type="hidden" id="categoryId-input" name="categoryId" />
+                      </div>
+                      <div>
+                        <Label htmlFor="date">Data</Label>
+                        <Input
+                          id="date"
+                          name="date"
+                          type="date"
+                          defaultValue={new Date().toISOString().split("T")[0]}
+                          required
+                        />
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <Label htmlFor="account">Conta/Caixa</Label>
+                        <Input
+                          id="account"
+                          name="account"
+                          defaultValue="Caixa Principal"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="paymentMethod">Pagamento</Label>
+                        <Select name="paymentMethod" defaultValue="pix" onValueChange={(val) => {
+                          const input = document.getElementById('paymentMethod-input') as HTMLInputElement;
+                          if (input) input.value = val;
+                        }} required>
+                          <SelectTrigger>
+                            <SelectValue placeholder="Selecione" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="money">Dinheiro</SelectItem>
+                            <SelectItem value="pix">PIX</SelectItem>
+                            <SelectItem value="credit_card">Cartão de Crédito</SelectItem>
+                            <SelectItem value="debit_card">Cartão de Débito</SelectItem>
+                            <SelectItem value="boleto">Boleto</SelectItem>
+                            <SelectItem value="transfer">Transferência</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <input type="hidden" id="paymentMethod-input" name="paymentMethod" defaultValue="pix" />
+                      </div>
+                    </div>
+
+                    {/* Collapsible Advanced Options */}
+                    <div className="border rounded-lg p-3 space-y-3">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className="w-full flex justify-between items-center h-auto p-0 hover:bg-transparent"
+                        onClick={() => setShowAdvanced(!showAdvanced)}
+                      >
+                        <span className="text-sm font-medium">Opções Avançadas</span>
+                        {showAdvanced ? (
+                          <ArrowUpRight className="h-4 w-4 transform rotate-45" />
+                        ) : (
+                          <Plus className="h-4 w-4" />
+                        )}
+                      </Button>
+
+                      {showAdvanced && (
+                        <div className="space-y-4 pt-2 border-t">
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <Label htmlFor="status">Status</Label>
+                              <Select name="status" defaultValue="confirmed" onValueChange={(val) => {
+                                const input = document.getElementById('status-input') as HTMLInputElement;
+                                if (input) input.value = val;
+                              }} required>
+                                <SelectTrigger>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  <SelectItem value="confirmed">Realizado</SelectItem>
+                                  <SelectItem value="pending">Agendado</SelectItem>
+                                  <SelectItem value="overdue">Atrasado</SelectItem>
+                                </SelectContent>
+                              </Select>
+                              <input type="hidden" id="status-input" name="status" defaultValue="confirmed" />
+                            </div>
+                            <div>
+                              <Label htmlFor="competenceDate">Data Competência</Label>
+                              <Input type="date" name="competenceDate" />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-2 gap-4">
+                            <div>
+                              <Label htmlFor="subcategoryId">Subcategoria</Label>
+                              <Select name="subcategoryId" onValueChange={(val) => {
+                                const input = document.getElementById('subcategoryId-input') as HTMLInputElement;
+                                if (input) input.value = val;
+                              }}>
+                                <SelectTrigger>
+                                  <SelectValue placeholder="Opcional" />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {categories?.filter(c => c.type === transactionType).map((category) => (
+                                    <SelectItem key={category.id} value={category.id}>
+                                      {category.name} (Sub)
+                                    </SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <input type="hidden" id="subcategoryId-input" name="subcategoryId" />
+                            </div>
+                            <div>
+                              <Label htmlFor="document">Documento/NF</Label>
+                              <Input name="document" placeholder="Nº Documento" />
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-2">
+                            <div>
+                              <Label htmlFor="grossAmount" className="text-xs">Valor Bruto</Label>
+                              <Input name="grossAmount" type="number" step="0.01" className="h-8" />
+                            </div>
+                            <div>
+                              <Label htmlFor="fees" className="text-xs">Taxas</Label>
+                              <Input name="fees" type="number" step="0.01" className="h-8" />
+                            </div>
+                            <div>
+                              <Label htmlFor="costCenter" className="text-xs">Centro Custo</Label>
+                              <Input name="costCenter" className="h-8" />
+                            </div>
+                          </div>
+
+                          <div>
+                            <Label htmlFor="recurrence">Recorrência</Label>
+                            <Select name="recurrence" defaultValue="none" onValueChange={(val) => {
+                              const input = document.getElementById('recurrence-input') as HTMLInputElement;
+                              if (input) input.value = val;
+                            }}>
+                              <SelectTrigger className="h-8">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="none">Não recorrente</SelectItem>
+                                <SelectItem value="weekly">Semanal</SelectItem>
+                                <SelectItem value="monthly">Mensal</SelectItem>
+                              </SelectContent>
+                            </Select>
+                            <input type="hidden" id="recurrence-input" name="recurrence" defaultValue="none" />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-4">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setIsDialogOpen(false)}
+                      >
+                        Cancelar
+                      </Button>
+                      <Button
+                        type="submit"
+                        disabled={createEntryMutation.isPending}
+                        className={transactionType === 'income' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}
+                      >
+                        {createEntryMutation.isPending ? "Salvando..." : "Salvar Lançamento"}
+                      </Button>
+                    </div>
+                  </form>
+                </TabsContent>
+
+                <TabsContent value="adjustment">
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault();
+                      const formData = new FormData(e.currentTarget);
+                      const balanceEntry = {
+                        date: formData.get("date") as string,
+                        balanceType: formData.get("balanceType") as 'initial' | 'final',
+                        description: formData.get("description") as string,
+                        amount: parseFloat(formData.get("amount") as string || "0"),
+                        account: formData.get("account") as string,
+                      };
+                      createBalanceAdjustmentMutation.mutate(balanceEntry);
+                    }}
+                    className="space-y-4 pt-4"
+                  >
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-4">
+                      <p className="text-sm text-blue-800 flex items-center gap-2">
+                        <AlertCircle className="h-4 w-4" />
+                        Use esta opção apenas para corrigir o saldo do sistema quando este não bater com o físico.
+                      </p>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <Label htmlFor="adj-date">Data do Ajuste</Label>
+                        <Input
+                          id="adj-date"
+                          name="date"
+                          type="date"
+                          defaultValue={new Date().toISOString().split("T")[0]}
+                          required
+                        />
+                      </div>
+                      <div>
+                        <Label htmlFor="balanceType">Tipo de Saldo</Label>
+                        <Select name="balanceType" defaultValue="final" onValueChange={(val) => {
+                          const input = document.getElementById('balanceType-input') as HTMLInputElement;
+                          if (input) input.value = val;
+                        }}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="initial">Saldo Inicial</SelectItem>
+                            <SelectItem value="final">Saldo Final</SelectItem>
+                          </SelectContent>
+                        </Select>
+                        <input type="hidden" id="balanceType-input" name="balanceType" defaultValue="final" />
+                      </div>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="adj-amount">Valor Real em Caixa (R$)</Label>
+                      <Input
+                        id="adj-amount"
+                        name="amount"
+                        type="number"
+                        step="0.01"
+                        className="text-lg font-bold"
+                        placeholder="0,00"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="adj-account">Conta/Caixa</Label>
+                      <Input
+                        id="adj-account"
+                        name="account"
+                        defaultValue="Caixa Principal"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <Label htmlFor="adj-description">Motivo do Ajuste</Label>
+                      <Input
+                        id="adj-description"
+                        name="description"
+                        placeholder="Ex: Diferença de caixa, Correção de saldo"
+                        required
+                      />
+                    </div>
+
+                    <div className="flex justify-end gap-2 pt-4">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={() => setIsDialogOpen(false)}
+                      >
+                        Cancelar
+                      </Button>
+                      <Button
+                        type="submit"
+                        disabled={createBalanceAdjustmentMutation.isPending}
+                      >
+                        {createBalanceAdjustmentMutation.isPending ? "Salvando..." : "Confirmar Ajuste"}
+                      </Button>
+                    </div>
+                  </form>
+                </TabsContent>
+              </Tabs>
+            </DialogContent>
+          </Dialog>
+
           <Dialog>
             <DialogTrigger asChild>
               <Button variant="outline" size="sm">
@@ -348,128 +773,128 @@ export default function CashFlow() {
 
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-7 gap-4">
-        <Card className="bg-gradient-to-br from-blue-50 to-blue-100 border-blue-200">
+        <Card className="bg-gradient-to-br from-blue-50 to-blue-100 dark:from-blue-950 dark:to-blue-900 border-blue-200 dark:border-blue-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-blue-600">Saldo Inicial</p>
-                <p className="text-2xl font-bold text-blue-900">
+                <p className="text-sm font-medium text-blue-600 dark:text-blue-400">Saldo Inicial</p>
+                <div className="text-2xl font-bold text-blue-900 dark:text-blue-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.initialBalance || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <Wallet className="h-8 w-8 text-blue-500" />
+              <Wallet className="h-8 w-8 text-blue-500 dark:text-blue-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-green-50 to-green-100 border-green-200">
+        <Card className="bg-gradient-to-br from-green-50 to-green-100 dark:from-green-950 dark:to-green-900 border-green-200 dark:border-green-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-green-600">Total Entradas</p>
-                <p className="text-2xl font-bold text-green-900">
+                <p className="text-sm font-medium text-green-600 dark:text-green-400">Total Entradas</p>
+                <div className="text-2xl font-bold text-green-900 dark:text-green-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.totalIncome || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <ArrowUpRight className="h-8 w-8 text-green-500" />
+              <ArrowUpRight className="h-8 w-8 text-green-500 dark:text-green-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-yellow-50 to-yellow-100 border-yellow-200">
+        <Card className="bg-gradient-to-br from-yellow-50 to-yellow-100 dark:from-yellow-950 dark:to-yellow-900 border-yellow-200 dark:border-yellow-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-yellow-600">Entradas Pendentes</p>
-                <p className="text-2xl font-bold text-yellow-900">
+                <p className="text-sm font-medium text-yellow-600 dark:text-yellow-400">Entradas Pendentes</p>
+                <div className="text-2xl font-bold text-yellow-900 dark:text-yellow-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.totalIncomePending || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <AlertTriangle className="h-8 w-8 text-yellow-500" />
+              <AlertTriangle className="h-8 w-8 text-yellow-500 dark:text-yellow-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-red-50 to-red-100 border-red-200">
+        <Card className="bg-gradient-to-br from-red-50 to-red-100 dark:from-red-950 dark:to-red-900 border-red-200 dark:border-red-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-red-600">Total Saídas</p>
-                <p className="text-2xl font-bold text-red-900">
+                <p className="text-sm font-medium text-red-600 dark:text-red-400">Total Saídas</p>
+                <div className="text-2xl font-bold text-red-900 dark:text-red-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.totalExpense || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <ArrowDownRight className="h-8 w-8 text-red-500" />
+              <ArrowDownRight className="h-8 w-8 text-red-500 dark:text-red-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-orange-50 to-orange-100 border-orange-200">
+        <Card className="bg-gradient-to-br from-orange-50 to-orange-100 dark:from-orange-950 dark:to-orange-900 border-orange-200 dark:border-orange-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-orange-600">Saídas Pendentes</p>
-                <p className="text-2xl font-bold text-orange-900">
+                <p className="text-sm font-medium text-orange-600 dark:text-orange-400">Saídas Pendentes</p>
+                <div className="text-2xl font-bold text-orange-900 dark:text-orange-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.totalExpensePending || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <AlertCircle className="h-8 w-8 text-orange-500" />
+              <AlertCircle className="h-8 w-8 text-orange-500 dark:text-orange-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-purple-50 to-purple-100 border-purple-200">
+        <Card className="bg-gradient-to-br from-purple-50 to-purple-100 dark:from-purple-950 dark:to-purple-900 border-purple-200 dark:border-purple-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-purple-600">Saldo Final</p>
-                <p className="text-2xl font-bold text-purple-900">
+                <p className="text-sm font-medium text-purple-600 dark:text-purple-400">Saldo Final</p>
+                <div className="text-2xl font-bold text-purple-900 dark:text-purple-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.finalBalance || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <DollarSign className="h-8 w-8 text-purple-500" />
+              <DollarSign className="h-8 w-8 text-purple-500 dark:text-purple-400" />
             </div>
           </CardContent>
         </Card>
 
-        <Card className="bg-gradient-to-br from-indigo-50 to-indigo-100 border-indigo-200">
+        <Card className="bg-gradient-to-br from-indigo-50 to-indigo-100 dark:from-indigo-950 dark:to-indigo-900 border-indigo-200 dark:border-indigo-800">
           <CardContent className="p-4">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-indigo-600">Saldo Projetado</p>
-                <p className="text-2xl font-bold text-indigo-900">
+                <p className="text-sm font-medium text-indigo-600 dark:text-indigo-400">Saldo Projetado</p>
+                <div className="text-2xl font-bold text-indigo-900 dark:text-indigo-100">
                   {summaryLoading ? (
                     <Skeleton className="h-8 w-24" />
                   ) : (
                     formatCurrency(summary?.projectedBalance || 0)
                   )}
-                </p>
+                </div>
               </div>
-              <Target className="h-8 w-8 text-indigo-500" />
+              <Target className="h-8 w-8 text-indigo-500 dark:text-indigo-400" />
             </div>
           </CardContent>
         </Card>
@@ -660,381 +1085,58 @@ export default function CashFlow() {
         </Card>
       </div>
 
-      {/* Daily Movements Section */}
+
+
+      {/* Tabela Mensal Detalhada com Filtros */}
       <Card>
         <CardHeader>
-          <CardTitle className="text-lg flex items-center justify-between">
-            <span>Movimentações Diárias</span>
-            <div className="flex items-center gap-2">
-              <Dialog open={isDialogOpen} onOpenChange={setIsDialogOpen}>
-                <DialogTrigger asChild>
-                  <Button size="sm" className="flex items-center gap-2">
-                    <Plus className="h-4 w-4" />
-                    Nova Movimentação
+          <CardTitle className="mb-4">Movimentações do Mês Detalhadas</CardTitle>
+          <div className="flex flex-col gap-4 bg-muted/30 p-4 rounded-lg">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-medium w-12 shrink-0">Ano:</span>
+              <div className="flex flex-wrap gap-2">
+                {[2024, 2025, 2026, 2027].map((year) => (
+                  <Button
+                    key={year}
+                    variant={selectedYear === year ? "default" : "outline"}
+                    size="sm"
+                    onClick={() => setSelectedYear(year)}
+                    className="w-16"
+                  >
+                    {year}
                   </Button>
-                </DialogTrigger>
-                <DialogContent className="sm:max-w-[600px] max-h-[90vh] overflow-y-auto">
-                  <DialogHeader>
-                    <DialogTitle>Lançamento Financeiro</DialogTitle>
-                  </DialogHeader>
-
-                  <Tabs defaultValue="transaction" className="w-full" onValueChange={(val) => setActiveTab(val)}>
-                    <TabsList className="grid w-full grid-cols-2 mb-4">
-                      <TabsTrigger value="transaction">Movimentação</TabsTrigger>
-                      <TabsTrigger value="adjustment">Ajuste de Saldo</TabsTrigger>
-                    </TabsList>
-
-                    <TabsContent value="transaction" className="space-y-4">
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          const formData = new FormData(e.currentTarget);
-
-                          const entry = {
-                            date: formData.get("date") as string,
-                            competenceDate: formData.get("competenceDate") as string || undefined,
-                            type: transactionType,
-                            movementType: "normal" as const,
-                            description: formData.get("description") as string,
-                            categoryId: formData.get("categoryId") as string,
-                            subcategoryId: formData.get("subcategoryId") as string || undefined,
-                            amount: parseFloat(formData.get("amount") as string),
-                            grossAmount: formData.get("grossAmount") ? parseFloat(formData.get("grossAmount") as string) : undefined,
-                            fees: formData.get("fees") ? parseFloat(formData.get("fees") as string) : undefined,
-                            paymentMethod: formData.get("paymentMethod") as string,
-                            account: formData.get("account") as string,
-                            status: formData.get("status") as 'confirmed' | 'pending' | 'overdue',
-                            document: formData.get("document") as string || undefined,
-                            costCenter: formData.get("costCenter") as string || undefined,
-                            recurrence: formData.get("recurrence") as string || undefined,
-                            dueDate: formData.get("dueDate") as string || undefined,
-                            actualDate: formData.get("actualDate") as string || undefined,
-                          };
-                          createEntryMutation.mutate(entry);
-                        }}
-                        className="space-y-4"
-                      >
-                        {/* Transaction Type Toggle */}
-                        <div className="flex gap-2 p-1 bg-muted rounded-lg">
-                          <Button
-                            type="button"
-                            variant={transactionType === 'income' ? 'default' : 'ghost'}
-                            className={`flex-1 ${transactionType === 'income' ? 'bg-green-600 hover:bg-green-700 text-white' : ''}`}
-                            onClick={() => setTransactionType('income')}
-                          >
-                            <TrendingUp className="mr-2 h-4 w-4" />
-                            Entrada
-                          </Button>
-                          <Button
-                            type="button"
-                            variant={transactionType === 'expense' ? 'default' : 'ghost'}
-                            className={`flex-1 ${transactionType === 'expense' ? 'bg-red-600 hover:bg-red-700 text-white' : ''}`}
-                            onClick={() => setTransactionType('expense')}
-                          >
-                            <TrendingDown className="mr-2 h-4 w-4" />
-                            Saída
-                          </Button>
-                        </div>
-
-                        {/* Amount */}
-                        <div>
-                          <Label htmlFor="amount" className="text-sm font-medium text-muted-foreground">Valor (R$)</Label>
-                          <Input
-                            id="amount"
-                            name="amount"
-                            type="number"
-                            step="0.01"
-                            placeholder="0,00"
-                            className="text-2xl font-bold h-12"
-                            required
-                            autoFocus
-                          />
-                        </div>
-
-                        {/* Description */}
-                        <div>
-                          <Label htmlFor="description">Descrição</Label>
-                          <Input
-                            id="description"
-                            name="description"
-                            placeholder={transactionType === 'income' ? "Ex: Venda de Serviços, Reembolso" : "Ex: Conta de Luz, Material de Escritório"}
-                            required
-                          />
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <Label htmlFor="category">Categoria</Label>
-                            <Select name="categoryId" required>
-                              <SelectTrigger>
-                                <SelectValue placeholder="Selecione" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {categories?.filter(c => c.type === transactionType).map((category) => (
-                                  <SelectItem key={category.id} value={category.id}>
-                                    {category.name}
-                                  </SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
-                          </div>
-                          <div>
-                            <Label htmlFor="date">Data</Label>
-                            <Input
-                              id="date"
-                              name="date"
-                              type="date"
-                              defaultValue={new Date().toISOString().split("T")[0]}
-                              required
-                            />
-                          </div>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <Label htmlFor="account">Conta/Caixa</Label>
-                            <Input
-                              id="account"
-                              name="account"
-                              defaultValue="Caixa Principal"
-                              required
-                            />
-                          </div>
-                          <div>
-                            <Label htmlFor="paymentMethod">Pagamento</Label>
-                            <Select name="paymentMethod" defaultValue="pix" required>
-                              <SelectTrigger>
-                                <SelectValue placeholder="Selecione" />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="money">Dinheiro</SelectItem>
-                                <SelectItem value="pix">PIX</SelectItem>
-                                <SelectItem value="credit_card">Cartão de Crédito</SelectItem>
-                                <SelectItem value="debit_card">Cartão de Débito</SelectItem>
-                                <SelectItem value="boleto">Boleto</SelectItem>
-                                <SelectItem value="transfer">Transferência</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        </div>
-
-                        {/* Collapsible Advanced Options */}
-                        <div className="border rounded-lg p-3 space-y-3">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            className="w-full flex justify-between items-center h-auto p-0 hover:bg-transparent"
-                            onClick={() => setShowAdvanced(!showAdvanced)}
-                          >
-                            <span className="text-sm font-medium">Opções Avançadas</span>
-                            {showAdvanced ? (
-                              <ArrowUpRight className="h-4 w-4 transform rotate-45" />
-                            ) : (
-                              <Plus className="h-4 w-4" />
-                            )}
-                          </Button>
-
-                          {showAdvanced && (
-                            <div className="space-y-4 pt-2 border-t">
-                              <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                  <Label htmlFor="status">Status</Label>
-                                  <Select name="status" defaultValue="confirmed">
-                                    <SelectTrigger>
-                                      <SelectValue />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      <SelectItem value="confirmed">Realizado</SelectItem>
-                                      <SelectItem value="pending">Agendado</SelectItem>
-                                      <SelectItem value="overdue">Atrasado</SelectItem>
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <div>
-                                  <Label htmlFor="competenceDate">Data Competência</Label>
-                                  <Input type="date" name="competenceDate" />
-                                </div>
-                              </div>
-
-                              <div className="grid grid-cols-2 gap-4">
-                                <div>
-                                  <Label htmlFor="subcategoryId">Subcategoria</Label>
-                                  <Select name="subcategoryId">
-                                    <SelectTrigger>
-                                      <SelectValue placeholder="Opcional" />
-                                    </SelectTrigger>
-                                    <SelectContent>
-                                      {categories?.filter(c => c.type === transactionType).map((category) => (
-                                        <SelectItem key={category.id} value={category.id}>
-                                          {category.name} (Sub)
-                                        </SelectItem>
-                                      ))}
-                                    </SelectContent>
-                                  </Select>
-                                </div>
-                                <div>
-                                  <Label htmlFor="document">Documento/NF</Label>
-                                  <Input name="document" placeholder="Nº Documento" />
-                                </div>
-                              </div>
-
-                              <div className="grid grid-cols-3 gap-2">
-                                <div>
-                                  <Label htmlFor="grossAmount" className="text-xs">Valor Bruto</Label>
-                                  <Input name="grossAmount" type="number" step="0.01" className="h-8" />
-                                </div>
-                                <div>
-                                  <Label htmlFor="fees" className="text-xs">Taxas</Label>
-                                  <Input name="fees" type="number" step="0.01" className="h-8" />
-                                </div>
-                                <div>
-                                  <Label htmlFor="costCenter" className="text-xs">Centro Custo</Label>
-                                  <Input name="costCenter" className="h-8" />
-                                </div>
-                              </div>
-
-                              <div>
-                                <Label htmlFor="recurrence">Recorrência</Label>
-                                <Select name="recurrence" defaultValue="none">
-                                  <SelectTrigger className="h-8">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="none">Não recorrente</SelectItem>
-                                    <SelectItem value="weekly">Semanal</SelectItem>
-                                    <SelectItem value="monthly">Mensal</SelectItem>
-                                  </SelectContent>
-                                </Select>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex justify-end gap-2 pt-4">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => setIsDialogOpen(false)}
-                          >
-                            Cancelar
-                          </Button>
-                          <Button
-                            type="submit"
-                            disabled={createEntryMutation.isPending}
-                            className={transactionType === 'income' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'}
-                          >
-                            {createEntryMutation.isPending ? "Salvando..." : "Salvar Lançamento"}
-                          </Button>
-                        </div>
-                      </form>
-                    </TabsContent>
-
-                    <TabsContent value="adjustment">
-                      <form
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          const formData = new FormData(e.currentTarget);
-                          const balanceEntry = {
-                            date: formData.get("date") as string,
-                            balanceType: formData.get("balanceType") as 'initial' | 'final',
-                            description: formData.get("description") as string,
-                            amount: parseFloat(formData.get("amount") as string),
-                            account: formData.get("account") as string,
-                          };
-                          createBalanceAdjustmentMutation.mutate(balanceEntry);
-                        }}
-                        className="space-y-4 pt-4"
-                      >
-                        <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 mb-4">
-                          <p className="text-sm text-blue-800 flex items-center gap-2">
-                            <AlertCircle className="h-4 w-4" />
-                            Use esta opção apenas para corrigir o saldo do sistema quando este não bater com o físico.
-                          </p>
-                        </div>
-
-                        <div className="grid grid-cols-2 gap-4">
-                          <div>
-                            <Label htmlFor="adj-date">Data do Ajuste</Label>
-                            <Input
-                              id="adj-date"
-                              name="date"
-                              type="date"
-                              defaultValue={new Date().toISOString().split("T")[0]}
-                              required
-                            />
-                          </div>
-                          <div>
-                            <Label htmlFor="balanceType">Tipo de Saldo</Label>
-                            <Select name="balanceType" defaultValue="final">
-                              <SelectTrigger>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="initial">Saldo Inicial</SelectItem>
-                                <SelectItem value="final">Saldo Final</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          </div>
-                        </div>
-
-                        <div>
-                          <Label htmlFor="adj-amount">Valor Real em Caixa (R$)</Label>
-                          <Input
-                            id="adj-amount"
-                            name="amount"
-                            type="number"
-                            step="0.01"
-                            className="text-lg font-bold"
-                            placeholder="0,00"
-                            required
-                          />
-                        </div>
-
-                        <div>
-                          <Label htmlFor="adj-account">Conta/Caixa</Label>
-                          <Input
-                            id="adj-account"
-                            name="account"
-                            defaultValue="Caixa Principal"
-                            required
-                          />
-                        </div>
-
-                        <div>
-                          <Label htmlFor="adj-description">Motivo do Ajuste</Label>
-                          <Input
-                            id="adj-description"
-                            name="description"
-                            placeholder="Ex: Diferença de caixa, Correção de saldo"
-                            required
-                          />
-                        </div>
-
-                        <div className="flex justify-end gap-2 pt-4">
-                          <Button
-                            type="button"
-                            variant="outline"
-                            onClick={() => setIsDialogOpen(false)}
-                          >
-                            Cancelar
-                          </Button>
-                          <Button
-                            type="submit"
-                            disabled={createBalanceAdjustmentMutation.isPending}
-                          >
-                            {createBalanceAdjustmentMutation.isPending ? "Salvando..." : "Confirmar Ajuste"}
-                          </Button>
-                        </div>
-                      </form>
-                    </TabsContent>
-                  </Tabs>
-                </DialogContent>
-              </Dialog>
+                ))}
+              </div>
             </div>
-          </CardTitle>
+
+            <Separator className="my-2" />
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm font-medium w-12 shrink-0">Mês:</span>
+              <div className="flex flex-wrap gap-2">
+                {Array.from({ length: 12 }).map((_, i) => {
+                  const date = new Date(2024, i, 1);
+                  const monthName = date.toLocaleString('pt-BR', { month: 'short' }).toUpperCase().replace('.', '');
+                  const fullMonthName = date.toLocaleString('pt-BR', { month: 'long' });
+                  return (
+                    <Button
+                      key={i}
+                      variant={selectedMonth === i ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setSelectedMonth(i)}
+                      title={fullMonthName}
+                      className="w-12"
+                    >
+                      {monthName}
+                    </Button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
         </CardHeader>
         <CardContent>
-          {movementsLoading ? (
+          {monthlyLoading ? (
             <div className="space-y-3">
               {Array.from({ length: 5 }).map((_, i) => (
                 <div key={i} className="flex items-center space-x-4">
@@ -1045,66 +1147,76 @@ export default function CashFlow() {
                 </div>
               ))}
             </div>
-          ) : movements && movements.length > 0 ? (
+          ) : monthlyMovements && monthlyMovements.length > 0 ? (
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Data</TableHead>
+                    <TableHead>Vencimento</TableHead>
                     <TableHead>Descrição</TableHead>
                     <TableHead>Categoria</TableHead>
-                    <TableHead>Conta</TableHead>
-                    <TableHead>Forma Pag</TableHead>
-                    <TableHead className="text-right">Valor</TableHead>
+                    <TableHead className="text-right">Valor Base</TableHead>
+                    <TableHead className="text-right">Juros/Multa</TableHead>
+                    <TableHead className="text-right">Descontos</TableHead>
+                    <TableHead className="text-right">Total Líquido</TableHead>
                     <TableHead>Status</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {movements.map((movement) => (
-                    <TableRow key={movement.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-2">
-                          <Calendar className="h-4 w-4 text-muted-foreground" />
-                          <span>{formatDate(movement.date)}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="font-medium">
-                        {movement.description}
-                      </TableCell>
-                      <TableCell>
-                        <Badge variant="secondary" className="font-normal">
-                          {movement.categoryName}
-                        </Badge>
-                      </TableCell>
-                      <TableCell>{movement.account}</TableCell>
-                      <TableCell>{movement.paymentMethod}</TableCell>
-                      <TableCell className={`text-right font-semibold ${movement.type === 'income'
-                        ? 'text-green-600 dark:text-green-400'
-                        : 'text-red-600 dark:text-red-400'
-                        }`}>
-                        {movement.type === 'income' ? '+' : '-'}{formatCurrency(movement.amount)}
-                      </TableCell>
-                      <TableCell>
-                        <Badge className={getStatusColor(movement.status)}>
-                          {getStatusLabel(movement.status)}
-                        </Badge>
-                      </TableCell>
-                    </TableRow>
-                  ))}
+                  {monthlyMovements.map((movement) => {
+                    const lateFees = movement.lateFees || 0;
+                    const discount = movement.discount || 0;
+                    const netAmount = movement.amount + lateFees - discount;
+
+                    return (
+                      <TableRow key={movement.id}>
+                        <TableCell>
+                          <div className="flex items-center gap-2 text-xs sm:text-sm">
+                            <Calendar className="h-4 w-4 text-muted-foreground" />
+                            <span>{formatDate(movement.date)}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="font-medium max-w-[200px] truncate">
+                          {movement.description}
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="secondary" className="font-normal text-[10px] sm:text-xs">
+                            {movement.categoryName}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="text-right text-muted-foreground">
+                          {formatCurrency(movement.amount)}
+                        </TableCell>
+                        <TableCell className="text-right text-orange-600">
+                          {lateFees > 0 ? `+${formatCurrency(lateFees)}` : "-"}
+                        </TableCell>
+                        <TableCell className="text-right text-red-600">
+                          {discount > 0 ? `-${formatCurrency(discount)}` : "-"}
+                        </TableCell>
+                        <TableCell className={`text-right font-bold ${movement.type === 'income'
+                          ? 'text-green-600 dark:text-green-400'
+                          : 'text-red-600 dark:text-red-400'
+                          }`}>
+                          {movement.type === 'income' ? '+' : '-'}{formatCurrency(netAmount)}
+                        </TableCell>
+                        <TableCell>
+                          <Badge className={getStatusColor(movement.status)}>
+                            {getStatusLabel(movement.status)}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
                 </TableBody>
               </Table>
             </div>
           ) : (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <Calendar className="h-12 w-12 text-muted-foreground mb-4" />
-              <h3 className="text-lg font-semibold mb-2">Nenhuma movimentação encontrada</h3>
-              <p className="text-muted-foreground mb-4">
-                Comece adicionando sua primeira movimentação de caixa.
+              <h3 className="text-lg font-semibold mb-2">Nenhuma movimentação neste mês</h3>
+              <p className="text-muted-foreground">
+                Selecione outro período ou adicione novas movimentações.
               </p>
-              <Button onClick={() => setIsDialogOpen(true)}>
-                <Plus className="h-4 w-4 mr-2" />
-                Adicionar Movimentação
-              </Button>
             </div>
           )}
         </CardContent>

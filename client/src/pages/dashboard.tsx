@@ -214,7 +214,7 @@ export default function Dashboard() {
     const now = new Date();
     let start = new Date();
     let end = new Date();
-    
+
     switch (newPeriod) {
       case 'current':
         start = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -234,7 +234,7 @@ export default function Dashboard() {
         end = new Date(now.getFullYear(), 11, 31);
         break;
     }
-    
+
     setStartDate(start.toISOString().split('T')[0]);
     setEndDate(end.toISOString().split('T')[0]);
   };
@@ -251,7 +251,7 @@ export default function Dashboard() {
             Período: {formatDate(startDate)} - {formatDate(endDate)}
           </p>
         </div>
-        
+
         <Card className="bg-white/80 backdrop-blur-sm border-0 shadow-lg">
           <CardContent className="p-4">
             <div className="flex items-center gap-4">
@@ -259,7 +259,7 @@ export default function Dashboard() {
                 <Filter className="h-4 w-4 text-muted-foreground" />
                 <Label className="text-sm font-medium">Período:</Label>
               </div>
-              
+
               <Select value={period} onValueChange={handlePeriodChange}>
                 <SelectTrigger className="w-32">
                   <SelectValue />
@@ -271,7 +271,7 @@ export default function Dashboard() {
                   <SelectItem value="year">Ano</SelectItem>
                 </SelectContent>
               </Select>
-              
+
               <div className="flex items-center gap-2">
                 <Label className="text-sm font-medium">De:</Label>
                 <Input
@@ -281,7 +281,7 @@ export default function Dashboard() {
                   className="w-36"
                 />
               </div>
-              
+
               <div className="flex items-center gap-2">
                 <Label className="text-sm font-medium">Até:</Label>
                 <Input
@@ -296,9 +296,9 @@ export default function Dashboard() {
         </Card>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
         {statsLoading ? (
-          Array.from({ length: 4 }).map((_, i) => (
+          Array.from({ length: 5 }).map((_, i) => (
             <Card key={i} className="bg-white/80 backdrop-blur-sm border-0 shadow-lg">
               <CardHeader className="flex flex-row items-center justify-between gap-2 space-y-0 pb-3">
                 <Skeleton className="h-4 w-24" />
@@ -326,6 +326,12 @@ export default function Dashboard() {
               trend="down"
               trendValue="-5%"
               variant="danger"
+            />
+            <KPICard
+              title="Total de Descontos"
+              value={formatCurrency(stats?.totalDiscounts || 0)}
+              icon={TrendingDown}
+              variant="success"
             />
             <KPICard
               title="Saldo Atual"

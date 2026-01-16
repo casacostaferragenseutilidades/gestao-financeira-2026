@@ -206,13 +206,18 @@ export async function registerRoutes(
   app.get("/api/accounts-payable/upcoming", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const upcoming = await storage.getUpcomingPayables(startDate, endDate);
+    const upcoming = await storage.getUpcomingAccountsPayable(startDate, endDate);
     res.json(upcoming);
   });
 
   app.post("/api/accounts-payable", requireFinancial, async (req, res) => {
-    const account = await storage.createAccountPayable(req.body);
-    res.status(201).json(account);
+    try {
+      console.log("POST /api/accounts-payable", JSON.stringify(req.body));
+      const account = await storage.createAccountPayable(req.body);
+      res.status(201).json(account);
+    } catch (err) {
+      res.status(400).json({ error: "Erro ao criar conta a pagar" });
+    }
   });
 
   app.patch("/api/accounts-payable/:id", requireFinancial, async (req, res) => {
@@ -222,7 +227,7 @@ export async function registerRoutes(
   });
 
   app.patch("/api/accounts-payable/:id/pay", requireFinancial, async (req, res) => {
-    const account = await storage.markAccountPayableAsPaid(req.params.id, req.body.paymentDate, req.body.lateFees);
+    const account = await storage.markAccountPayableAsPaid(req.params.id, req.body.paymentDate, req.body.lateFees, req.body.discount);
     if (!account) return res.status(404).json({ error: "Not found" });
     res.json(account);
   });
@@ -246,7 +251,7 @@ export async function registerRoutes(
   app.get("/api/accounts-receivable/upcoming", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const upcoming = await storage.getUpcomingReceivables(startDate, endDate);
+    const upcoming = await storage.getUpcomingAccountsReceivable(startDate, endDate);
     res.json(upcoming);
   });
 
@@ -262,7 +267,7 @@ export async function registerRoutes(
   });
 
   app.patch("/api/accounts-receivable/:id/receive", requireFinancial, async (req, res) => {
-    const account = await storage.markAccountReceivableAsReceived(req.params.id, req.body.receivedDate, req.body.discount);
+    const account = await storage.markAccountReceivableAsReceived(req.params.id, req.body.receivedDate, req.body.discount, req.body.paymentMethod);
     if (!account) return res.status(404).json({ error: "Not found" });
     res.json(account);
   });
@@ -374,10 +379,12 @@ export async function registerRoutes(
         return res.status(401).json({ error: "Usuário não autenticado" });
       }
 
+      console.log("Creating cash flow entry with body:", req.body);
       const entry = await storage.createCashFlowEntry({ ...req.body, userId });
       res.json(entry);
-    } catch (error) {
-      res.status(400).json({ error: "Erro ao criar movimentação" });
+    } catch (error: any) {
+      console.error("Error creating cash flow entry:", error);
+      res.status(400).json({ error: "Erro ao criar movimentação", details: error.message });
     }
   });
 
@@ -412,6 +419,63 @@ export async function registerRoutes(
     const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
     const data = await storage.getDREData(year, month);
     res.json(data);
+  });
+
+  app.get("/api/notes", requireViewer, async (req, res) => {
+    const notes = await storage.getNotes();
+    res.json(notes);
+  });
+
+  app.post("/api/notes", requireFinancial, async (req, res) => {
+    const note = await storage.createNote(req.body);
+    res.status(201).json(note);
+  });
+
+  app.patch("/api/notes/:id", requireFinancial, async (req, res) => {
+    const note = await storage.updateNote(req.params.id, req.body);
+    if (!note) return res.status(404).json({ error: "Not found" });
+    res.json(note);
+  });
+
+  app.delete("/api/notes/:id", requireFinancial, async (req, res) => {
+    await storage.deleteNote(req.params.id);
+    res.status(204).send();
+  });
+
+  app.get("/api/financial-goals", requireViewer, async (req, res) => {
+    const month = req.query.month ? parseInt(req.query.month as string) : undefined;
+    const year = req.query.year ? parseInt(req.query.year as string) : undefined;
+    const goals = await storage.getFinancialGoals(month, year);
+    res.json(goals);
+  });
+
+  app.post("/api/financial-goals", requireFinancial, async (req, res) => {
+    try {
+      console.log("POST /api/financial-goals", JSON.stringify(req.body));
+      const goal = await storage.createFinancialGoal(req.body);
+      res.status(201).json(goal);
+    } catch (error) {
+      console.error("Error creating goal:", error);
+      res.status(400).json({ error: "Erro ao criar meta" });
+    }
+  });
+
+  app.patch("/api/financial-goals/:id", requireFinancial, async (req, res) => {
+    const goal = await storage.updateFinancialGoal(req.params.id, req.body);
+    if (!goal) return res.status(404).json({ error: "Not found" });
+    res.json(goal);
+  });
+
+  app.delete("/api/financial-goals/:id", requireFinancial, async (req, res) => {
+    await storage.deleteFinancialGoal(req.params.id);
+    res.status(204).send();
+  });
+
+  app.get("/api/financial-goals/progress", requireViewer, async (req, res) => {
+    const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
+    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const progress = await storage.getFinancialGoalsProgress(month, year);
+    res.json(progress);
   });
 
   app.get("/api/reports/:type", requireViewer, async (req, res) => {

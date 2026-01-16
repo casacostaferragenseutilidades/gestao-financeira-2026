@@ -1,14 +1,4 @@
 services:
-  # PostgreSQL Database
-  - type: pserv
-    name: gestao-financeira-db
-    env: docker
-    plan: free
-    region: oregon
-    databases:
-      - name: gestao_financeira
-        user: gestao_user
-
   # Web Service (Backend + Frontend)
   - type: web
     name: gestao-financeira-app
@@ -21,9 +11,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: DATABASE_URL
-        fromDatabase:
-          name: gestao-financeira-db
-          property: connectionString
+        sync: false
       - key: SESSION_SECRET
         generateValue: true
       - key: PORT

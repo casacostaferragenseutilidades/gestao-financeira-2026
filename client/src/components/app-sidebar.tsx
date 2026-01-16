@@ -13,6 +13,7 @@ import {
   FolderTree,
   RefreshCw,
   UserCog,
+  Target,
 } from "lucide-react";
 import {
   Sidebar,
@@ -59,6 +60,11 @@ const mainNavItems = [
     url: "/relatorios",
     icon: BarChart3,
   },
+  {
+    title: "Metas",
+    url: "/metas-financeiras",
+    icon: Target,
+  },
 ];
 
 const settingsNavItems = [
@@ -98,15 +104,19 @@ export function AppSidebar() {
   const { user } = useAuth();
 
   return (
-    <Sidebar>
-      <SidebarHeader className="p-4">
-        <div className="flex items-center gap-2">
-          <div className="flex h-10 w-10 items-center justify-center rounded-md bg-primary">
-            <TrendingUp className="h-6 w-6 text-primary-foreground" />
+    <Sidebar collapsible="icon" className="border-r border-sidebar-border bg-sidebar/95 backdrop-blur supports-[backdrop-filter]:bg-sidebar/90">
+      <SidebarHeader className="p-4 border-b border-sidebar-border/50">
+        <div className="flex items-center gap-3 transition-all duration-300 group-data-[state=collapsed]:justify-center">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-emerald-600 shadow-lg shadow-primary/25 ring-1 ring-white/10">
+            <TrendingUp className="h-6 w-6 text-white" />
           </div>
-          <div className="flex flex-col">
-            <span className="text-lg font-bold" data-testid="text-app-name">FinControl</span>
-            <span className="text-xs text-muted-foreground">Controle Financeiro</span>
+          <div className="flex flex-col group-data-[state=collapsed]:hidden overflow-hidden transition-all duration-300">
+            <span className="text-lg font-bold tracking-tight text-sidebar-foreground truncate" data-testid="text-app-name">
+              FinControl
+            </span>
+            <span className="text-xs font-medium text-muted-foreground truncate">
+              Gestão Financeira
+            </span>
           </div>
         </div>
       </SidebarHeader>

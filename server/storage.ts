@@ -2,7 +2,8 @@ import { eq, and, lte, gte, sql } from "drizzle-orm";
 import { db } from "./db";
 import {
   users, suppliers, clients, categories, costCenters,
-  accountsPayable, accountsReceivable, mercadoPagoTransactions, cashFlowEntries, balanceAdjustments,
+  accountsPayable, accountsReceivable, mercadoPagoTransactions, cashFlowEntries, balanceAdjustments, notes,
+  financialGoals,
 } from "@shared/schema";
 import type {
   User, InsertUser,
@@ -16,6 +17,8 @@ import type {
   DashboardStats, CashFlowData, DREData, CategoryExpense,
   CashFlowEntry, InsertCashFlowEntry, CashFlowKPIs, CashFlowAlert, DailyMovement,
   BalanceAdjustment, InsertBalanceAdjustment,
+  Note, InsertNote,
+  FinancialGoal, InsertFinancialGoal, FinancialGoalProgress,
 } from "@shared/schema";
 import { hashPassword } from "./auth";
 
@@ -56,7 +59,7 @@ export interface IStorage {
   getUpcomingAccountsPayable(): Promise<AccountPayable[]>;
   createAccountPayable(account: InsertAccountPayable): Promise<AccountPayable>;
   updateAccountPayable(id: string, account: Partial<InsertAccountPayable>): Promise<AccountPayable | undefined>;
-  markAccountPayableAsPaid(id: string, paymentDate: string, lateFees?: string): Promise<AccountPayable | undefined>;
+  markAccountPayableAsPaid(id: string, paymentDate: string, lateFees?: string, discount?: string): Promise<AccountPayable | undefined>;
   deleteAccountPayable(id: string): Promise<boolean>;
   deactivateAccountPayable(id: string): Promise<AccountPayable | undefined>;
 
@@ -65,7 +68,7 @@ export interface IStorage {
   getUpcomingAccountsReceivable(): Promise<AccountReceivable[]>;
   createAccountReceivable(account: InsertAccountReceivable): Promise<AccountReceivable>;
   updateAccountReceivable(id: string, account: Partial<InsertAccountReceivable>): Promise<AccountReceivable | undefined>;
-  markAccountReceivableAsReceived(id: string, receivedDate: string, discount?: string): Promise<AccountReceivable | undefined>;
+  markAccountReceivableAsReceived(id: string, receivedDate: string, discount?: string, paymentMethod?: string): Promise<AccountReceivable | undefined>;
   deleteAccountReceivable(id: string): Promise<boolean>;
 
   getDashboardStats(): Promise<DashboardStats>;
@@ -85,7 +88,19 @@ export interface IStorage {
   getBalanceAdjustments(date?: string): Promise<BalanceAdjustment[]>;
   getCategoryExpenses(): Promise<CategoryExpense[]>;
   getDREData(year: number, month: number): Promise<{ current: DREData; previous: DREData; percentageChange: { grossRevenue: number; netProfit: number } }>;
-  
+
+  getFinancialGoals(month?: number, year?: number): Promise<FinancialGoal[]>;
+  createFinancialGoal(goal: InsertFinancialGoal): Promise<FinancialGoal>;
+  updateFinancialGoal(id: string, goal: Partial<InsertFinancialGoal>): Promise<FinancialGoal | undefined>;
+  deleteFinancialGoal(id: string): Promise<boolean>;
+  getFinancialGoalsProgress(month: number, year: number): Promise<FinancialGoalProgress[]>;
+
+  getNotes(): Promise<Note[]>;
+  getNote(id: string): Promise<Note | undefined>;
+  createNote(note: InsertNote): Promise<Note>;
+  updateNote(id: string, note: Partial<InsertNote>): Promise<Note | undefined>;
+  deleteNote(id: string): Promise<boolean>;
+
   seedDefaultData(): Promise<void>;
 }
 
@@ -350,7 +365,7 @@ export class DatabaseStorage implements IStorage {
     } : undefined;
   }
 
-  async getUpcomingPayables(startDate?: string, endDate?: string): Promise<AccountPayable[]> {
+  async getUpcomingAccountsPayable(startDate?: string, endDate?: string): Promise<AccountPayable[]> {
     if (startDate && endDate) {
       return db.select().from(accountsPayable)
         .where(and(
@@ -359,7 +374,7 @@ export class DatabaseStorage implements IStorage {
           lte(accountsPayable.dueDate, endDate)
         ));
     }
-    
+
     const today = new Date();
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
@@ -373,22 +388,106 @@ export class DatabaseStorage implements IStorage {
   }
 
   async createAccountPayable(account: InsertAccountPayable): Promise<AccountPayable> {
+    console.log(`Creating Account Payable: ${account.description}, Recurrence: ${account.recurrence}, End: ${account.recurrenceEnd}`);
     const [newAccount] = await db.insert(accountsPayable).values({
       ...account,
       status: account.status || "pending",
     }).returning();
+
+    if (newAccount.recurrence && newAccount.recurrence !== "none" && (newAccount.recurrenceEnd || "").length > 0) {
+      console.log(`Triggering recurrence for ${newAccount.id}`);
+      await this.handleRecurrence(newAccount);
+    } else {
+      console.log(`No recurrence triggered for ${newAccount.id}. Recurrence: ${newAccount.recurrence}, End: ${newAccount.recurrenceEnd}`);
+    }
+
     return newAccount;
   }
 
   async updateAccountPayable(id: string, account: Partial<InsertAccountPayable>): Promise<AccountPayable | undefined> {
+    console.log(`Updating Account Payable: ${id}, Recurrence: ${account.recurrence}, End: ${account.recurrenceEnd}`);
     const [updated] = await db.update(accountsPayable).set(account).where(eq(accountsPayable.id, id)).returning();
+
+    // If recurrence was added/updated, handle it (simplified: just call the same logic if we have enough info)
+    // Note: This could create duplicates if not careful, but usually we only do this on create.
+    // However, if the user manually triggers it by updating, we'll try to help.
+    if (updated && account.recurrence && account.recurrence !== "none" && (account.recurrenceEnd || "").length > 0) {
+      console.log(`Triggering recurrence update for ${id}`);
+      await this.handleRecurrence(updated);
+    }
+
     return updated;
   }
 
-  async markAccountPayableAsPaid(id: string, paymentDate: string, lateFees?: string): Promise<AccountPayable | undefined> {
+  private async handleRecurrence(account: AccountPayable) {
+    const recEnd = (account.recurrenceEnd || "").trim();
+    if (!account.recurrence || account.recurrence === "none" || recEnd.length === 0) {
+      console.log(`Canceling recurrence generation: incomplete data.`, { rec: account.recurrence, end: account.recurrenceEnd });
+      return;
+    }
+
+    const entriesToCreate: (typeof accountsPayable.$inferInsert)[] = [];
+    const startDateStr = account.dueDate.split('T')[0];
+    const endDateStr = recEnd.split('T')[0];
+
+    const startDate = new Date(startDateStr + 'T12:00:00');
+    const endDate = new Date(endDateStr + 'T12:00:00');
+
+    console.log(`Recurrence generation range: ${startDateStr} to ${endDateStr}`);
+
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      console.error("Invalid dates for recurrence:", { startDateStr, endDateStr });
+      return;
+    }
+
+    let currentDate = new Date(startDate);
+    let count = 0;
+    while (count < 100) {
+      if (account.recurrence === 'weekly') currentDate.setDate(currentDate.getDate() + 7);
+      else if (account.recurrence === 'monthly') currentDate.setMonth(currentDate.getMonth() + 1);
+      else if (account.recurrence === 'yearly') currentDate.setFullYear(currentDate.getFullYear() + 1);
+      else break;
+
+      if (currentDate > endDate) {
+        console.log(`Current date ${currentDate.toISOString().split('T')[0]} exceeds end date ${endDateStr}. Stopping.`);
+        break;
+      }
+
+      const dueDateStr = currentDate.toISOString().split('T')[0];
+      console.log(`Adding entry for: ${dueDateStr}`);
+      entriesToCreate.push({
+        description: account.description,
+        amount: account.amount,
+        dueDate: dueDateStr,
+        status: "pending",
+        supplierId: account.supplierId,
+        categoryId: account.categoryId,
+        costCenterId: account.costCenterId,
+        paymentMethod: account.paymentMethod,
+        lateFees: account.lateFees,
+        discount: account.discount,
+        notes: account.notes,
+        recurrence: "none",
+        recurrenceEnd: null,
+      });
+      count++;
+    }
+
+    if (entriesToCreate.length > 0) {
+      console.log(`Inserting ${entriesToCreate.length} recurring entries`);
+      await db.insert(accountsPayable).values(entriesToCreate);
+    } else {
+      console.log("No recurring entries were generated.");
+    }
+  }
+
+  async markAccountPayableAsPaid(id: string, paymentDate: string, lateFees?: string, discount?: string): Promise<AccountPayable | undefined> {
     const updateData: any = { status: "paid", paymentDate };
     if (lateFees !== undefined) {
       updateData.lateFees = lateFees || null;
+    }
+    if (discount !== undefined) {
+      updateData.discount = discount || null;
     }
     const [updated] = await db.update(accountsPayable)
       .set(updateData)
@@ -419,7 +518,7 @@ export class DatabaseStorage implements IStorage {
     return account;
   }
 
-  async getUpcomingReceivables(startDate?: string, endDate?: string): Promise<AccountReceivable[]> {
+  async getUpcomingAccountsReceivable(startDate?: string, endDate?: string): Promise<AccountReceivable[]> {
     if (startDate && endDate) {
       return db.select().from(accountsReceivable)
         .where(and(
@@ -428,7 +527,7 @@ export class DatabaseStorage implements IStorage {
           lte(accountsReceivable.dueDate, endDate)
         ));
     }
-    
+
     const today = new Date();
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
@@ -454,10 +553,13 @@ export class DatabaseStorage implements IStorage {
     return updated;
   }
 
-  async markAccountReceivableAsReceived(id: string, receivedDate: string, discount?: string): Promise<AccountReceivable | undefined> {
+  async markAccountReceivableAsReceived(id: string, receivedDate: string, discount?: string, paymentMethod?: string): Promise<AccountReceivable | undefined> {
     const updateData: any = { status: "received", receivedDate };
     if (discount !== undefined) {
       updateData.discount = discount || null;
+    }
+    if (paymentMethod !== undefined) {
+      updateData.paymentMethod = paymentMethod || null;
     }
     const [updated] = await db.update(accountsReceivable)
       .set(updateData)
@@ -467,7 +569,9 @@ export class DatabaseStorage implements IStorage {
   }
 
   async deleteAccountReceivable(id: string): Promise<boolean> {
-    await db.delete(accountsReceivable).where(eq(accountsReceivable.id, id));
+    await db.update(accountsReceivable)
+      .set({ active: false })
+      .where(eq(accountsReceivable.id, id));
     return true;
   }
 
@@ -475,25 +579,25 @@ export class DatabaseStorage implements IStorage {
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
-    
+
     const today = new Date();
     const todayStr = today.toISOString().split("T")[0];
-    
+
     // Filter by date range if provided
-    const filteredPayables = startDate && endDate 
+    const filteredPayables = startDate && endDate
       ? allPayables.filter(p => {
-          const date = p.paymentDate || p.dueDate;
-          return date >= startDate && date <= endDate;
-        })
+        const date = p.paymentDate || p.dueDate;
+        return date >= startDate && date <= endDate;
+      })
       : allPayables;
-      
+
     const filteredReceivables = startDate && endDate
       ? allReceivables.filter(r => {
-          const date = r.receivedDate || r.dueDate;
-          return date >= startDate && date <= endDate;
-        })
+        const date = r.receivedDate || r.dueDate;
+        return date >= startDate && date <= endDate;
+      })
       : allReceivables;
-      
+
     const filteredCashFlowEntries = startDate && endDate
       ? allCashFlowEntries.filter(e => e.date >= startDate && e.date <= endDate)
       : allCashFlowEntries;
@@ -502,15 +606,15 @@ export class DatabaseStorage implements IStorage {
       .filter(r => r.status === "received")
       .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0) +
       filteredCashFlowEntries
-      .filter(e => e.type === "income" && e.status === "confirmed")
-      .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
+        .filter(e => e.type === "income" && e.status === "confirmed")
+        .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
 
     const totalExpenses = filteredPayables
       .filter(p => p.status === "paid")
       .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0) +
       filteredCashFlowEntries
-      .filter(e => e.type === "expense" && e.status === "confirmed")
-      .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
+        .filter(e => e.type === "expense" && e.status === "confirmed")
+        .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
 
     const pendingReceivables = filteredReceivables
       .filter(r => r.status === "pending")
@@ -522,33 +626,33 @@ export class DatabaseStorage implements IStorage {
 
     const overduePayables = startDate && endDate
       ? filteredPayables.filter(p => {
-          if (p.status === "paid") return false;
-          return p.dueDate < startDate;
-        }).length
+        if (p.status === "paid") return false;
+        return p.dueDate < startDate;
+      }).length
       : allPayables.filter(p => {
-          if (p.status === "paid") return false;
-          return p.dueDate < todayStr;
-        }).length;
+        if (p.status === "paid") return false;
+        return p.dueDate < todayStr;
+      }).length;
 
     const overdueReceivables = startDate && endDate
       ? filteredReceivables.filter(r => {
-          if (r.status === "received") return false;
-          return r.dueDate < startDate;
-        }).length
+        if (r.status === "received") return false;
+        return r.dueDate < startDate;
+      }).length
       : allReceivables.filter(r => {
-          if (r.status === "received") return false;
-          return r.dueDate < todayStr;
-        }).length;
+        if (r.status === "received") return false;
+        return r.dueDate < todayStr;
+      }).length;
 
     const dueTodayCount = startDate && endDate
       ? [...filteredPayables, ...filteredReceivables].filter(a => {
-          if (a.status === "paid" || a.status === "received") return false;
-          return a.dueDate >= startDate && a.dueDate <= endDate && a.dueDate === todayStr;
-        }).length
+        if (a.status === "paid" || a.status === "received") return false;
+        return a.dueDate >= startDate && a.dueDate <= endDate && a.dueDate === todayStr;
+      }).length
       : [...allPayables, ...allReceivables].filter(a => {
-          if (a.status === "paid" || a.status === "received") return false;
-          return a.dueDate === todayStr;
-        }).length;
+        if (a.status === "paid" || a.status === "received") return false;
+        return a.dueDate === todayStr;
+      }).length;
 
     const nextWeek = new Date(today);
     nextWeek.setDate(nextWeek.getDate() + 7);
@@ -556,16 +660,20 @@ export class DatabaseStorage implements IStorage {
 
     const dueThisWeekCount = startDate && endDate
       ? [...filteredPayables, ...filteredReceivables].filter(a => {
-          if (a.status === "paid" || a.status === "received") return false;
-          return a.dueDate >= startDate && a.dueDate <= endDate && a.dueDate >= todayStr && a.dueDate <= nextWeekStr;
-        }).length
+        if (a.status === "paid" || a.status === "received") return false;
+        return a.dueDate >= startDate && a.dueDate <= endDate && a.dueDate >= todayStr && a.dueDate <= nextWeekStr;
+      }).length
       : [...allPayables, ...allReceivables].filter(a => {
-          if (a.status === "paid" || a.status === "received") return false;
-          return a.dueDate >= todayStr && a.dueDate <= nextWeekStr;
-        }).length;
+        if (a.status === "paid" || a.status === "received") return false;
+        return a.dueDate >= todayStr && a.dueDate <= nextWeekStr;
+      }).length;
 
     const balance = totalRevenue - totalExpenses;
     const projectedBalance = balance + pendingReceivables - pendingPayables;
+
+    const totalDiscounts = filteredPayables
+      .filter(p => p.status === "paid" && p.discount)
+      .reduce((sum, p) => sum + parseFloat(p.discount || "0"), 0);
 
     return {
       totalRevenue,
@@ -576,6 +684,7 @@ export class DatabaseStorage implements IStorage {
       overdueReceivables,
       dueTodayCount,
       dueThisWeekCount,
+      totalDiscounts,
     };
   }
 
@@ -583,14 +692,14 @@ export class DatabaseStorage implements IStorage {
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
-    
+
     const today = new Date();
     const data: Map<string, CashFlowData> = new Map();
-    
+
     let days = 7;
     if (period === "weekly") days = 28;
     if (period === "monthly") days = 90;
-    
+
     let runningBalance = 0;
     let initialBalance = 0;
 
@@ -598,24 +707,24 @@ export class DatabaseStorage implements IStorage {
     const startDate = new Date(today);
     startDate.setDate(startDate.getDate() - days);
     const startDateStr = startDate.toISOString().split("T")[0];
-    
+
     const confirmedIncome = allReceivables
       .filter(r => r.status === "received" && r.receivedDate && r.receivedDate < startDateStr)
       .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-      
+
     const confirmedExpense = allPayables
       .filter(p => p.status === "paid" && p.paymentDate && p.paymentDate < startDateStr)
       .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-      
+
     // Add manual cash flow entries to initial balance
     const manualIncome = allCashFlowEntries
       .filter(e => e.type === "income" && e.status === "confirmed" && e.date < startDateStr)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
     const manualExpense = allCashFlowEntries
       .filter(e => e.type === "expense" && e.status === "confirmed" && e.date < startDateStr)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-    
+
     initialBalance = confirmedIncome - confirmedExpense + manualIncome - manualExpense;
     runningBalance = initialBalance;
 
@@ -623,33 +732,33 @@ export class DatabaseStorage implements IStorage {
       const date = new Date(today);
       date.setDate(date.getDate() + i);
       const dateStr = date.toISOString().split("T")[0];
-      
+
       const dayIncome = allReceivables
         .filter(r => (r.status === "received" ? r.receivedDate === dateStr : r.dueDate === dateStr))
         .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-      
+
       // Add manual income entries for the day
       const manualDayIncome = allCashFlowEntries
         .filter(e => e.type === "income" && e.date === dateStr)
         .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
       const totalDayIncome = dayIncome + manualDayIncome;
-      
+
       const dayExpense = allPayables
         .filter(p => (p.status === "paid" ? p.paymentDate === dateStr : p.dueDate === dateStr))
         .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-      
+
       // Add manual expense entries for the day
       const manualDayExpense = allCashFlowEntries
         .filter(e => e.type === "expense" && e.date === dateStr)
         .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
       const totalDayExpense = dayExpense + manualDayExpense;
-      
+
       const dayInitialBalance = runningBalance;
       runningBalance += totalDayIncome - totalDayExpense;
       const dayFinalBalance = runningBalance;
-      
+
       data.set(dateStr, {
         date: dateStr,
         income: totalDayIncome,
@@ -660,27 +769,27 @@ export class DatabaseStorage implements IStorage {
         finalBalance: dayFinalBalance,
       });
     }
-    
+
     return Array.from(data.values()).sort((a, b) => a.date.localeCompare(b.date));
   }
 
   async getCashFlowSummary(period: string): Promise<{ totalIncome: number; totalExpense: number; netFlow: number; projectedBalance: number; currentBalance: number; initialBalance: number; finalBalance: number; totalIncomePending: number; totalExpensePending: number; totalIncomeConfirmed: number; totalExpenseConfirmed: number }> {
     const cashFlowData = await this.getCashFlowData(period);
     const stats = await this.getDashboardStats();
-    
+
     const totalIncome = cashFlowData.reduce((sum, d) => sum + d.income, 0);
     const totalExpense = cashFlowData.reduce((sum, d) => sum + d.expense, 0);
-    
+
     // Calcular valores separados por status
     const allReceivables = await db.select().from(accountsReceivable);
     const allPayables = await db.select().from(accountsPayable);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
-    
+
     // Filtrar por período
     const today = new Date();
     let startDate: Date;
     let endDate: Date;
-    
+
     if (period === "daily") {
       startDate = new Date(today);
       endDate = new Date(today);
@@ -696,57 +805,75 @@ export class DatabaseStorage implements IStorage {
       startDate = new Date(today);
       endDate = new Date(today);
     }
-    
+
     const startDateStr = startDate.toISOString().split("T")[0];
     const endDateStr = endDate.toISOString().split("T")[0];
-    
+
     // Receitas confirmadas (recebidas)
     const confirmedIncome = allReceivables
       .filter(r => r.status === "received" && r.receivedDate && r.receivedDate >= startDateStr && r.receivedDate <= endDateStr)
-      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-    
+      .reduce((sum, r) => {
+        const amount = parseFloat(r.amount || "0");
+        const discount = parseFloat(r.discount || "0");
+        return sum + (amount - discount);
+      }, 0);
+
     // Receitas manuais confirmadas
     const manualConfirmedIncome = allCashFlowEntries
       .filter(e => e.type === "income" && e.status === "confirmed" && e.date >= startDateStr && e.date <= endDateStr)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-    
+
     const totalIncomeConfirmed = confirmedIncome + manualConfirmedIncome;
-    
+
     // Receitas pendentes - APENAS contas a receber pendentes
     const totalIncomePending = allReceivables
       .filter(r => r.status === "pending" && r.dueDate && r.dueDate >= startDateStr && r.dueDate <= endDateStr)
-      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-    
+      .reduce((sum, r) => {
+        const amount = parseFloat(r.amount || "0");
+        const discount = parseFloat(r.discount || "0");
+        return sum + (amount - discount);
+      }, 0);
+
     // Despesas confirmadas (pagas)
     const confirmedExpense = allPayables
       .filter(p => p.status === "paid" && p.paymentDate && p.paymentDate >= startDateStr && p.paymentDate <= endDateStr)
-      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-    
+      .reduce((sum, p) => {
+        const amount = parseFloat(p.amount || "0");
+        const lateFees = parseFloat(p.lateFees || "0");
+        const discount = parseFloat(p.discount || "0");
+        return sum + (amount + lateFees - discount);
+      }, 0);
+
     // Despesas manuais confirmadas
     const manualConfirmedExpense = allCashFlowEntries
       .filter(e => e.type === "expense" && e.status === "confirmed" && e.date >= startDateStr && e.date <= endDateStr)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-    
+
     const totalExpenseConfirmed = confirmedExpense + manualConfirmedExpense;
-    
+
     // Despesas pendentes - APENAS contas a pagar pendentes
     const totalExpensePending = allPayables
       .filter(p => p.status === "pending" && p.dueDate && p.dueDate >= startDateStr && p.dueDate <= endDateStr)
-      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-    
+      .reduce((sum, p) => {
+        const amount = parseFloat(p.amount || "0");
+        const lateFees = parseFloat(p.lateFees || "0");
+        const discount = parseFloat(p.discount || "0");
+        return sum + (amount + lateFees - discount);
+      }, 0);
+
     // Calcular saldo inicial (ajustes de saldo do tipo 'initial')
     const allBalanceAdjustments = await db.select().from(balanceAdjustments);
     const initialBalanceAdjustments = allBalanceAdjustments
       .filter(a => a.balanceType === 'initial' && a.date >= startDateStr && a.date <= endDateStr)
       .reduce((sum, a) => sum + parseFloat(a.amount?.toString() || "0"), 0);
-    
+
     const todayData = cashFlowData.find(d => d.date === today.toISOString().split("T")[0]);
-    
+
     // Novo cálculo do saldo projetado: Total Entradas + Entradas Pendentes - Total Saídas - Saídas Pendentes
     const totalAllIncome = totalIncomeConfirmed + totalIncomePending;
     const totalAllExpense = totalExpenseConfirmed + totalExpensePending;
     const projectedBalance = totalAllIncome - totalAllExpense;
-    
+
     return {
       totalIncome: totalIncomeConfirmed + initialBalanceAdjustments, // Total Entradas = Saldo Inicial + Entradas Confirmadas
       totalExpense: totalExpenseConfirmed,
@@ -766,35 +893,35 @@ export class DatabaseStorage implements IStorage {
     const cashFlowData = await this.getCashFlowData(period);
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
-    
+
     // Average balance
     const averageBalance = cashFlowData.reduce((sum, d) => sum + d.balance, 0) / cashFlowData.length;
-    
+
     // Income vs Expense ratio
     const totalIncome = cashFlowData.reduce((sum, d) => sum + d.income, 0);
     const totalExpense = cashFlowData.reduce((sum, d) => sum + d.expense, 0);
     const incomeVsExpense = totalIncome > 0 ? (totalIncome - totalExpense) / totalIncome : 0;
-    
+
     // Delinquency rate (overdue accounts)
     const today = new Date().toISOString().split("T")[0];
     const overduePayables = allPayables.filter(p => p.status !== "paid" && p.dueDate < today);
     const overdueReceivables = allReceivables.filter(r => r.status !== "received" && r.dueDate < today);
     const totalPayables = allPayables.filter(p => p.status !== "paid").length;
     const totalReceivables = allReceivables.filter(r => r.status !== "received").length;
-    const delinquencyRate = (totalPayables + totalReceivables) > 0 ? 
+    const delinquencyRate = (totalPayables + totalReceivables) > 0 ?
       (overduePayables.length + overdueReceivables.length) / (totalPayables + totalReceivables) : 0;
-    
+
     // Immediate liquidity (current balance / next 7 days expenses)
     const next7Days = cashFlowData.filter(d => !d.projected && d.date >= today).slice(0, 7);
     const next7DaysExpenses = next7Days.reduce((sum, d) => sum + d.expense, 0);
     const currentBalance = cashFlowData.find(d => d.date === today)?.balance || 0;
     const immediateLiquidity = next7DaysExpenses > 0 ? currentBalance / next7DaysExpenses : 1;
-    
+
     // Burn rate (average daily expense)
     const dailyExpenses = cashFlowData.filter(d => !d.projected && d.expense > 0);
-    const burnRate = dailyExpenses.length > 0 ? 
+    const burnRate = dailyExpenses.length > 0 ?
       dailyExpenses.reduce((sum, d) => sum + d.expense, 0) / dailyExpenses.length : 0;
-    
+
     return {
       averageBalance,
       incomeVsExpense,
@@ -807,63 +934,81 @@ export class DatabaseStorage implements IStorage {
   async getCashFlowSummaryByDateRange(startDate: string, endDate: string): Promise<{ totalIncome: number; totalExpense: number; netFlow: number; projectedBalance: number; currentBalance: number; initialBalance: number; finalBalance: number; totalIncomePending: number; totalExpensePending: number; totalIncomeConfirmed: number; totalExpenseConfirmed: number }> {
     const cashFlowData = await this.getCashFlowDataByDateRange(startDate, endDate);
     const stats = await this.getDashboardStats();
-    
+
     const totalIncome = cashFlowData.reduce((sum, d) => sum + d.income, 0);
     const totalExpense = cashFlowData.reduce((sum, d) => sum + d.expense, 0);
-    
+
     // Calcular valores separados por status
     const allReceivables = await db.select().from(accountsReceivable);
     const allPayables = await db.select().from(accountsPayable);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
     const allBalanceAdjustments = await db.select().from(balanceAdjustments);
-    
+
     // Receitas confirmadas (recebidas)
     const confirmedIncome = allReceivables
       .filter(r => r.status === "received" && r.receivedDate && r.receivedDate >= startDate && r.receivedDate <= endDate)
-      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-    
+      .reduce((sum, r) => {
+        const amount = parseFloat(r.amount || "0");
+        const discount = parseFloat(r.discount || "0");
+        return sum + (amount - discount);
+      }, 0);
+
     // Receitas manuais confirmadas
     const manualConfirmedIncome = allCashFlowEntries
       .filter(e => e.type === "income" && e.status === "confirmed" && e.date >= startDate && e.date <= endDate)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-    
+
     const totalIncomeConfirmed = confirmedIncome + manualConfirmedIncome;
-    
+
     // Receitas pendentes - APENAS contas a receber pendentes
     const totalIncomePending = allReceivables
       .filter(r => r.status === "pending" && r.dueDate && r.dueDate >= startDate && r.dueDate <= endDate)
-      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-    
+      .reduce((sum, r) => {
+        const amount = parseFloat(r.amount || "0");
+        const discount = parseFloat(r.discount || "0");
+        return sum + (amount - discount);
+      }, 0);
+
     // Despesas confirmadas (pagas)
     const confirmedExpense = allPayables
       .filter(p => p.status === "paid" && p.paymentDate && p.paymentDate >= startDate && p.paymentDate <= endDate)
-      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-    
+      .reduce((sum, p) => {
+        const amount = parseFloat(p.amount || "0");
+        const lateFees = parseFloat(p.lateFees || "0");
+        const discount = parseFloat(p.discount || "0");
+        return sum + (amount + lateFees - discount);
+      }, 0);
+
     // Despesas manuais confirmadas
     const manualConfirmedExpense = allCashFlowEntries
       .filter(e => e.type === "expense" && e.status === "confirmed" && e.date >= startDate && e.date <= endDate)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-    
+
     const totalExpenseConfirmed = confirmedExpense + manualConfirmedExpense;
-    
+
     // Despesas pendentes - APENAS contas a pagar pendentes
     const totalExpensePending = allPayables
       .filter(p => p.status === "pending" && p.dueDate && p.dueDate >= startDate && p.dueDate <= endDate)
-      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-    
+      .reduce((sum, p) => {
+        const amount = parseFloat(p.amount || "0");
+        const lateFees = parseFloat(p.lateFees || "0");
+        const discount = parseFloat(p.discount || "0");
+        return sum + (amount + lateFees - discount);
+      }, 0);
+
     // Calcular saldo inicial (ajustes de saldo do tipo 'initial')
     const initialBalanceAdjustments = allBalanceAdjustments
       .filter(a => a.balanceType === 'initial' && a.date >= startDate && a.date <= endDate)
       .reduce((sum, a) => sum + parseFloat(a.amount?.toString() || "0"), 0);
-    
+
     const today = new Date().toISOString().split("T")[0];
     const todayData = cashFlowData.find(d => d.date === today);
-    
+
     // Novo cálculo do saldo projetado: Total Entradas + Entradas Pendentes - Total Saídas - Saídas Pendentes
     const totalAllIncome = totalIncomeConfirmed + totalIncomePending;
     const totalAllExpense = totalExpenseConfirmed + totalExpensePending;
     const projectedBalance = totalAllIncome - totalAllExpense;
-    
+
     return {
       totalIncome: totalIncomeConfirmed + initialBalanceAdjustments, // Total Entradas = Saldo Inicial + Entradas Confirmadas
       totalExpense: totalExpenseConfirmed,
@@ -883,35 +1028,35 @@ export class DatabaseStorage implements IStorage {
     const cashFlowData = await this.getCashFlowDataByDateRange(startDate, endDate);
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
-    
+
     // Average balance
     const averageBalance = cashFlowData.reduce((sum, d) => sum + d.balance, 0) / cashFlowData.length;
-    
+
     // Income vs Expense ratio
     const totalIncome = cashFlowData.reduce((sum, d) => sum + d.income, 0);
     const totalExpense = cashFlowData.reduce((sum, d) => sum + d.expense, 0);
     const incomeVsExpense = totalIncome > 0 ? (totalIncome - totalExpense) / totalIncome : 0;
-    
+
     // Delinquency rate (overdue accounts)
     const today = new Date().toISOString().split("T")[0];
     const overduePayables = allPayables.filter(p => p.status !== "paid" && p.dueDate < today);
     const overdueReceivables = allReceivables.filter(r => r.status !== "received" && r.dueDate < today);
     const totalPayables = allPayables.filter(p => p.status !== "paid").length;
     const totalReceivables = allReceivables.filter(r => r.status !== "received").length;
-    const delinquencyRate = (totalPayables + totalReceivables) > 0 ? 
+    const delinquencyRate = (totalPayables + totalReceivables) > 0 ?
       (overduePayables.length + overdueReceivables.length) / (totalPayables + totalReceivables) : 0;
-    
+
     // Immediate liquidity (current balance / next 7 days expenses)
     const next7Days = cashFlowData.filter(d => !d.projected && d.date >= today).slice(0, 7);
     const next7DaysExpenses = next7Days.reduce((sum, d) => sum + d.expense, 0);
     const currentBalance = cashFlowData.find(d => d.date === today)?.balance || 0;
     const immediateLiquidity = next7DaysExpenses > 0 ? currentBalance / next7DaysExpenses : 1;
-    
+
     // Burn rate (average daily expense)
     const dailyExpenses = cashFlowData.filter(d => !d.projected && d.expense > 0);
-    const burnRate = dailyExpenses.length > 0 ? 
+    const burnRate = dailyExpenses.length > 0 ?
       dailyExpenses.reduce((sum, d) => sum + d.expense, 0) / dailyExpenses.length : 0;
-    
+
     return {
       averageBalance,
       incomeVsExpense,
@@ -925,10 +1070,10 @@ export class DatabaseStorage implements IStorage {
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
     const cashFlowData = await this.getCashFlowData("daily");
-    
+
     const alerts: CashFlowAlert[] = [];
     const today = new Date().toISOString().split("T")[0];
-    
+
     // Check for negative balance
     const currentBalance = cashFlowData.find(d => d.date === today)?.balance || 0;
     if (currentBalance < 0) {
@@ -936,56 +1081,83 @@ export class DatabaseStorage implements IStorage {
         id: "negative-balance",
         message: `Saldo negativo: R$ ${currentBalance.toFixed(2)}`,
         severity: "high",
-        relatedId: null,
-        type: "balance"
+        relatedId: undefined,
+        type: "negative_balance",
+        date: today
       });
     }
-    
-    // Check overdue payables
-    const overduePayables = allPayables.filter(p => p.status !== "paid" && p.dueDate < today);
-    if (overduePayables.length > 0) {
-      const totalOverdue = overduePayables.reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
+
+    // Individual Overdue Payables
+    const overduePayables = allPayables.filter(p => p.status !== "paid" && p.dueDate < today && p.active !== false);
+    overduePayables.forEach(p => {
       alerts.push({
-        id: "overdue-payables",
-        message: `${overduePayables.length} contas a pagar vencidas (R$ ${totalOverdue.toFixed(2)})`,
-        severity: "medium",
-        relatedId: null,
-        type: "payable"
+        id: `overdue-payable-${p.id}`,
+        message: `Pagamento VENCIDO: ${p.description} (R$ ${parseFloat(p.amount || "0").toFixed(2)})`,
+        severity: "high",
+        relatedId: p.id,
+        type: "overdue_account",
+        date: p.dueDate
       });
-    }
-    
-    // Check late receivables
-    const lateReceivables = allReceivables.filter(r => r.status !== "received" && r.dueDate < today);
-    if (lateReceivables.length > 0) {
-      const totalLate = lateReceivables.reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
+    });
+
+    // Payables Due Today
+    const todayPayables = allPayables.filter(p => p.status !== "paid" && p.dueDate === today && p.active !== false);
+    todayPayables.forEach(p => {
       alerts.push({
-        id: "late-receivables",
-        message: `${lateReceivables.length} contas a receber em atraso (R$ ${totalLate.toFixed(2)})`,
+        id: `today-payable-${p.id}`,
+        message: `Pagar HOJE: ${p.description} (R$ ${parseFloat(p.amount || "0").toFixed(2)})`,
         severity: "medium",
-        relatedId: null,
-        type: "receivable"
+        relatedId: p.id,
+        type: "overdue_account",
+        date: p.dueDate
       });
-    }
-    
+    });
+
+    // Individual Late Receivables
+    const lateReceivables = allReceivables.filter(r => r.status !== "received" && r.dueDate < today && r.active !== false);
+    lateReceivables.forEach(r => {
+      alerts.push({
+        id: `late-receivable-${r.id}`,
+        message: `Recebimento EM ATRASO: ${r.description} (R$ ${parseFloat(r.amount || "0").toFixed(2)})`,
+        severity: "high",
+        relatedId: r.id,
+        type: "late_receipt",
+        date: r.dueDate
+      });
+    });
+
+    // Receivables Due Today
+    const todayReceivables = allReceivables.filter(r => r.status !== "received" && r.dueDate === today && r.active !== false);
+    todayReceivables.forEach(r => {
+      alerts.push({
+        id: `today-receivable-${r.id}`,
+        message: `Receber HOJE: ${r.description} (R$ ${parseFloat(r.amount || "0").toFixed(2)})`,
+        severity: "medium",
+        relatedId: r.id,
+        type: "late_receipt",
+        date: r.dueDate
+      });
+    });
+
     return alerts;
   }
 
-    async getDailyMovements(date: string): Promise<DailyMovement[]> {
+  async getDailyMovements(date: string): Promise<DailyMovement[]> {
     console.log(`[DEBUG] getDailyMovements called for date: ${date}`);
-    
+
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
     const allCategories = await db.select().from(categories);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
     const allBalanceAdjustments = await db.select().from(balanceAdjustments);
-    
+
     console.log(`[DEBUG] Found ${allCashFlowEntries.length} cash flow entries`);
     console.log(`[DEBUG] Found ${allBalanceAdjustments.length} balance adjustments`);
     console.log(`[DEBUG] Cash flow entries:`, allCashFlowEntries.map(e => ({ id: e.id, date: e.date, type: e.type, description: e.description, amount: e.amount })));
     console.log(`[DEBUG] Balance adjustments:`, allBalanceAdjustments.map(a => ({ id: a.id, date: a.date, balanceType: a.balanceType, description: a.description, amount: a.amount })));
-    
+
     const movements: DailyMovement[] = [];
-    
+
     // Process balance adjustments first
     allBalanceAdjustments
       .filter(adjustment => adjustment.date === date)
@@ -1007,6 +1179,8 @@ export class DatabaseStorage implements IStorage {
           subcategoryId: undefined,
           subcategoryName: undefined,
           grossAmount: undefined,
+          lateFees: undefined,
+          discount: undefined,
           fees: undefined,
           document: undefined,
           costCenter: undefined,
@@ -1015,10 +1189,10 @@ export class DatabaseStorage implements IStorage {
           actualDate: undefined,
         });
       });
-    
+
     // Process receivables
     allReceivables
-      .filter(r => (r.status === "received" && r.receivedDate === date) || (r.status === "pending" && r.dueDate === date))
+      .filter(r => r.dueDate === date)
       .forEach(r => {
         const category = allCategories.find(c => c.id === r.categoryId);
         movements.push({
@@ -1038,6 +1212,8 @@ export class DatabaseStorage implements IStorage {
           subcategoryId: undefined,
           subcategoryName: undefined,
           grossAmount: undefined,
+          lateFees: undefined,
+          discount: parseFloat(r.discount || "0"),
           fees: undefined,
           document: undefined,
           costCenter: undefined,
@@ -1049,7 +1225,7 @@ export class DatabaseStorage implements IStorage {
 
     // Process payables
     allPayables
-      .filter(p => (p.status === "paid" && p.paymentDate === date) || (p.status === "pending" && p.dueDate === date))
+      .filter(p => p.dueDate === date)
       .forEach(p => {
         const category = allCategories.find(c => c.id === p.categoryId);
         movements.push({
@@ -1069,6 +1245,8 @@ export class DatabaseStorage implements IStorage {
           subcategoryId: undefined,
           subcategoryName: undefined,
           grossAmount: undefined,
+          lateFees: parseFloat(p.lateFees || "0"),
+          discount: parseFloat(p.discount || "0"),
           fees: undefined,
           document: undefined,
           costCenter: undefined,
@@ -1081,7 +1259,7 @@ export class DatabaseStorage implements IStorage {
     // Process manual cash flow entries
     const manualEntries = allCashFlowEntries.filter(entry => entry.date === date);
     console.log(`[DEBUG] Found ${manualEntries.length} manual entries for date ${date}`);
-    
+
     manualEntries.forEach(entry => {
       const category = allCategories.find(c => c.id === entry.categoryId);
       const movement = {
@@ -1097,6 +1275,8 @@ export class DatabaseStorage implements IStorage {
         subcategoryName: entry.subcategoryId ? allCategories.find(c => c.id === entry.subcategoryId)?.name : undefined,
         amount: parseFloat(entry.amount?.toString() || "0"),
         grossAmount: entry.grossAmount ? parseFloat(entry.grossAmount.toString()) : undefined,
+        lateFees: undefined,
+        discount: undefined,
         fees: entry.fees ? parseFloat(entry.fees.toString()) : undefined,
         paymentMethod: entry.paymentMethod || 'N/A',
         account: entry.account || 'Conta Principal',
@@ -1111,7 +1291,7 @@ export class DatabaseStorage implements IStorage {
       console.log(`[DEBUG] Adding manual movement:`, movement);
       movements.push(movement);
     });
-    
+
     console.log(`[DEBUG] Total movements: ${movements.length}`);
     return movements.sort((a, b) => a.type.localeCompare(b.type));
   }
@@ -1180,6 +1360,8 @@ export class DatabaseStorage implements IStorage {
             subcategoryId: undefined,
             subcategoryName: undefined,
             grossAmount: undefined,
+            lateFees: undefined,
+            discount: undefined,
             fees: undefined,
             document: undefined,
             costCenter: undefined,
@@ -1191,7 +1373,7 @@ export class DatabaseStorage implements IStorage {
 
       // Process receivables
       allReceivables
-        .filter(r => (r.status === "received" && r.receivedDate === dateStr) || (r.status === "pending" && r.dueDate === dateStr))
+        .filter(r => r.dueDate === dateStr)
         .forEach(r => {
           const category = allCategories.find(c => c.id === r.categoryId);
           movements.push({
@@ -1211,6 +1393,8 @@ export class DatabaseStorage implements IStorage {
             subcategoryId: undefined,
             subcategoryName: undefined,
             grossAmount: undefined,
+            lateFees: undefined,
+            discount: parseFloat(r.discount || "0"),
             fees: undefined,
             document: undefined,
             costCenter: undefined,
@@ -1222,7 +1406,7 @@ export class DatabaseStorage implements IStorage {
 
       // Process payables
       allPayables
-        .filter(p => (p.status === "paid" && p.paymentDate === dateStr) || (p.status === "pending" && p.dueDate === dateStr))
+        .filter(p => p.dueDate === dateStr)
         .forEach(p => {
           const category = allCategories.find(c => c.id === p.categoryId);
           movements.push({
@@ -1242,6 +1426,8 @@ export class DatabaseStorage implements IStorage {
             subcategoryId: undefined,
             subcategoryName: undefined,
             grossAmount: undefined,
+            lateFees: parseFloat(p.lateFees || "0"),
+            discount: parseFloat(p.discount || "0"),
             fees: undefined,
             document: undefined,
             costCenter: undefined,
@@ -1260,8 +1446,8 @@ export class DatabaseStorage implements IStorage {
           movements.push({
             id: entry.id,
             date: dateStr,
-            type: entry.type,
-            movementType: entry.movementType,
+            type: entry.type as 'income' | 'expense',
+            movementType: entry.movementType as 'normal' | 'initial_balance' | 'balance_adjustment' | 'withdrawal',
             description: entry.description,
             categoryId: entry.categoryId || '',
             categoryName: category?.name || 'Sem categoria',
@@ -1269,10 +1455,12 @@ export class DatabaseStorage implements IStorage {
             subcategoryName: subcategory?.name || undefined,
             amount: parseFloat(entry.amount?.toString() || "0"),
             grossAmount: entry.grossAmount ? parseFloat(entry.grossAmount.toString()) : undefined,
+            lateFees: undefined,
+            discount: undefined,
             fees: entry.fees ? parseFloat(entry.fees.toString()) : undefined,
             paymentMethod: entry.paymentMethod,
             account: entry.account,
-            status: entry.status,
+            status: entry.status as 'pending' | 'confirmed' | 'overdue',
             document: entry.document || undefined,
             costCenter: entry.costCenter || undefined,
             recurrence: entry.recurrence || undefined,
@@ -1308,60 +1496,78 @@ export class DatabaseStorage implements IStorage {
     const allPayables = await db.select().from(accountsPayable);
     const allReceivables = await db.select().from(accountsReceivable);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
-    
+
     const data: Map<string, CashFlowData> = new Map();
     let runningBalance = 0;
-    
+
     // Calculate initial balance before start date
     const confirmedIncome = allReceivables
       .filter(r => r.status === "received" && r.receivedDate && r.receivedDate < startDate)
-      .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-      
+      .reduce((sum, r) => {
+        const amount = parseFloat(r.amount || "0");
+        const discount = parseFloat(r.discount || "0");
+        return sum + (amount - discount);
+      }, 0);
+
     const confirmedExpense = allPayables
       .filter(p => p.status === "paid" && p.paymentDate && p.paymentDate < startDate)
-      .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-      
+      .reduce((sum, p) => {
+        const amount = parseFloat(p.amount || "0");
+        const lateFees = parseFloat(p.lateFees || "0");
+        const discount = parseFloat(p.discount || "0");
+        return sum + (amount + lateFees - discount);
+      }, 0);
+
     const manualIncome = allCashFlowEntries
       .filter(e => e.type === "income" && e.status === "confirmed" && e.date < startDate)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
     const manualExpense = allCashFlowEntries
       .filter(e => e.type === "expense" && e.status === "confirmed" && e.date < startDate)
       .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-    
+
     runningBalance = confirmedIncome - confirmedExpense + manualIncome - manualExpense;
-    
+
     // Generate data for each day in the range
     const start = new Date(startDate);
     const end = new Date(endDate);
-    
+
     for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
       const dateStr = d.toISOString().split("T")[0];
-      
+
       const dayIncome = allReceivables
         .filter(r => (r.status === "received" ? r.receivedDate === dateStr : r.dueDate === dateStr))
-        .reduce((sum, r) => sum + parseFloat(r.amount || "0"), 0);
-        
+        .reduce((sum, r) => {
+          const amount = parseFloat(r.amount || "0");
+          const discount = parseFloat(r.discount || "0");
+          return sum + (amount - discount);
+        }, 0);
+
       const manualDayIncome = allCashFlowEntries
         .filter(e => e.type === "income" && e.date === dateStr)
         .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
       const totalDayIncome = dayIncome + manualDayIncome;
-      
+
       const dayExpense = allPayables
         .filter(p => (p.status === "paid" ? p.paymentDate === dateStr : p.dueDate === dateStr))
-        .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-        
+        .reduce((sum, p) => {
+          const amount = parseFloat(p.amount || "0");
+          const lateFees = parseFloat(p.lateFees || "0");
+          const discount = parseFloat(p.discount || "0");
+          return sum + (amount + lateFees - discount);
+        }, 0);
+
       const manualDayExpense = allCashFlowEntries
         .filter(e => e.type === "expense" && e.date === dateStr)
         .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
       const totalDayExpense = dayExpense + manualDayExpense;
-      
+
       const dayInitialBalance = runningBalance;
       runningBalance += totalDayIncome - totalDayExpense;
       const dayFinalBalance = runningBalance;
-      
+
       data.set(dateStr, {
         date: dateStr,
         income: totalDayIncome,
@@ -1372,7 +1578,7 @@ export class DatabaseStorage implements IStorage {
         finalBalance: dayFinalBalance,
       });
     }
-    
+
     return Array.from(data.values()).sort((a, b) => a.date.localeCompare(b.date));
   }
 
@@ -1380,35 +1586,35 @@ export class DatabaseStorage implements IStorage {
     const allPayables = await db.select().from(accountsPayable);
     const allCashFlowEntries = await db.select().from(cashFlowEntries);
     const allCategories = await db.select().from(categories);
-    
+
     // Filter by date range
     const filteredPayables = allPayables.filter(p => {
       const date = p.paymentDate || p.dueDate;
       return date >= startDate && date <= endDate;
     });
-    
-    const filteredCashFlowEntries = allCashFlowEntries.filter(e => 
+
+    const filteredCashFlowEntries = allCashFlowEntries.filter(e =>
       e.type === "expense" && e.date >= startDate && e.date <= endDate
     );
-    
+
     const expenseCategories = allCategories.filter(c => c.type === "expense");
-    
+
     // Calculate total for percentage
     const payablesTotal = filteredPayables.reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
     const cashFlowTotal = filteredCashFlowEntries.reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
     const total = payablesTotal + cashFlowTotal;
-    
+
     return expenseCategories.map(cat => {
       const payablesAmount = filteredPayables
         .filter(p => p.categoryId === cat.id)
         .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-        
+
       const cashFlowAmount = filteredCashFlowEntries
         .filter(e => e.categoryId === cat.id)
         .reduce((sum, e) => sum + parseFloat(e.amount?.toString() || "0"), 0);
-      
+
       const amount = payablesAmount + cashFlowAmount;
-      
+
       return {
         categoryId: cat.id,
         categoryName: cat.name,
@@ -1421,17 +1627,17 @@ export class DatabaseStorage implements IStorage {
   async getCategoryExpenses(): Promise<CategoryExpense[]> {
     const allPayables = await db.select().from(accountsPayable);
     const allCategories = await db.select().from(categories);
-    
+
     const expenseCategories = allCategories.filter(c => c.type === "expense");
     const payablesWithCategory = allPayables.filter(p => p.categoryId);
-    
+
     const total = payablesWithCategory.reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-    
+
     return expenseCategories.map(cat => {
       const amount = payablesWithCategory
         .filter(p => p.categoryId === cat.id)
         .reduce((sum, p) => sum + parseFloat(p.amount || "0"), 0);
-      
+
       return {
         categoryId: cat.id,
         categoryName: cat.name,
@@ -1502,6 +1708,8 @@ export class DatabaseStorage implements IStorage {
         csll: 0,
         pis: 0,
         cofins: 0,
+        icms: 0,
+        iss: 0,
         otherTaxes: 0,
         depreciation: 0,
         amortization: 0,
@@ -1543,6 +1751,106 @@ export class DatabaseStorage implements IStorage {
         .where(eq(balanceAdjustments.date, date));
     }
     return await db.select().from(balanceAdjustments);
+  }
+
+  async getFinancialGoals(month?: number, year?: number): Promise<FinancialGoal[]> {
+    if (month && year) {
+      return await db.select().from(financialGoals).where(and(eq(financialGoals.month, month), eq(financialGoals.year, year)));
+    }
+    return await db.select().from(financialGoals);
+  }
+
+  async createFinancialGoal(goal: InsertFinancialGoal): Promise<FinancialGoal> {
+    const [newGoal] = await db.insert(financialGoals).values(goal).returning();
+    return newGoal;
+  }
+
+  async updateFinancialGoal(id: string, goalData: Partial<InsertFinancialGoal>): Promise<FinancialGoal | undefined> {
+    const [updated] = await db.update(financialGoals).set(goalData).where(eq(financialGoals.id, id)).returning();
+    return updated;
+  }
+
+  async deleteFinancialGoal(id: string): Promise<boolean> {
+    const [deleted] = await db.delete(financialGoals).where(eq(financialGoals.id, id)).returning();
+    return !!deleted;
+  }
+
+  async getFinancialGoalsProgress(month: number, year: number): Promise<FinancialGoalProgress[]> {
+    const goals = await this.getFinancialGoals(month, year);
+    const startOfMonth = new Date(year, month - 1, 1).toISOString().split('T')[0];
+    const endOfMonth = new Date(year, month, 0).toISOString().split('T')[0];
+
+    // Only get paid expenses and received revenues within the month
+    const allPayables = await db.select().from(accountsPayable);
+    const allReceivables = await db.select().from(accountsReceivable);
+
+    // Filter for paid payables with payment date in the month
+    const paidPayables = allPayables.filter(p =>
+      p.status === 'paid' &&
+      p.paymentDate &&
+      p.paymentDate >= startOfMonth &&
+      p.paymentDate <= endOfMonth
+    );
+
+    // Filter for received receivables with received date in the month
+    const receivedReceivables = allReceivables.filter(r =>
+      r.status === 'received' &&
+      r.receivedDate &&
+      r.receivedDate >= startOfMonth &&
+      r.receivedDate <= endOfMonth
+    );
+
+    return goals.map(goal => {
+      let currentAmount = 0;
+
+      if (goal.type === 'income_total') {
+        currentAmount = receivedReceivables.reduce((sum, r) => sum + parseFloat(r.amount), 0);
+      } else if (goal.type === 'expense_total') {
+        currentAmount = paidPayables.reduce((sum, p) => sum + parseFloat(p.amount), 0);
+      } else if (goal.type === 'category' && goal.categoryId) {
+        // Find if category is income or expense
+        const incomeSum = receivedReceivables.filter(r => r.categoryId === goal.categoryId).reduce((sum, r) => sum + parseFloat(r.amount), 0);
+        const expenseSum = paidPayables.filter(p => p.categoryId === goal.categoryId).reduce((sum, p) => sum + parseFloat(p.amount), 0);
+        currentAmount = incomeSum + expenseSum;
+      }
+
+      const target = parseFloat(goal.targetAmount);
+      const percentage = target > 0 ? (currentAmount / target) * 100 : 0;
+
+      return {
+        ...goal,
+        currentAmount,
+        percentage
+      };
+    });
+  }
+
+  async getNotes(): Promise<Note[]> {
+    return await db.select().from(notes).orderBy(notes.updatedAt);
+  }
+
+  async getNote(id: string): Promise<Note | undefined> {
+    const [note] = await db.select().from(notes).where(eq(notes.id, id));
+    return note;
+  }
+
+  async createNote(note: InsertNote): Promise<Note> {
+    const [newNote] = await db.insert(notes).values(note).returning();
+    return newNote;
+  }
+
+  async updateNote(id: string, noteData: Partial<InsertNote>): Promise<Note | undefined> {
+    const [updatedNote] = await db
+      .update(notes)
+      .set({ ...noteData, updatedAt: new Date() })
+      .where(eq(notes.id, id))
+      .returning();
+    return updatedNote;
+  }
+
+  async deleteNote(id: string): Promise<boolean> {
+    const [deleted] = await db.delete(notes).where(eq(notes.id, id)).returning();
+    return !!deleted;
   }
 }
 
