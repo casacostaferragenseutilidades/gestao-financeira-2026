@@ -16,6 +16,16 @@ export async function registerRoutes(
     res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
+  // Debug endpoint
+  app.get("/debug", (req, res) => {
+    res.json({
+      authenticated: req.isAuthenticated(),
+      user: req.user,
+      session: req.session,
+      headers: req.headers
+    });
+  });
+
   app.post("/api/auth/logout", (req, res) => {
     req.logout(() => {
       res.json({ success: true });
