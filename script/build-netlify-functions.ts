@@ -23,9 +23,8 @@ export { handler };
 const apiHandler = `
 import express from 'express';
 import serverless from 'serverless-http';
-import { storage } from '../../server/storage.js';
-import { registerRoutes } from '../../server/routes.js';
 
+// Simplified handler for Netlify
 const app = express();
 
 // CORS configuration
@@ -46,22 +45,22 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
-// Initialize database and routes
-let serverInitialized = false;
+// Basic health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', message: 'API is working' });
+});
 
-const initializeServer = async () => {
-  if (!serverInitialized) {
-    await storage.initializeDatabase();
-    await storage.seedDefaultData();
-    await registerRoutes(null, app);
-    serverInitialized = true;
-  }
-};
+// Catch-all handler for API routes
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ 
+    error: 'API endpoint not found',
+    message: 'The requested API endpoint is not available',
+    path: req.path
+  });
+});
 
 // Main handler
 export const handler = serverless(async (event, context) => {
-  await initializeServer();
-  
   // The serverless-http handler will process the event
   return app;
 });
