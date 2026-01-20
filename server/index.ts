@@ -80,6 +80,7 @@ export { app, httpServer };
 
 if (process.env.NODE_ENV !== "test" && !process.env.VERCEL) {
   (async () => {
+    await storage.initializeDatabase(); // Inicializar banco de dados
     await storage.seedDefaultData();
     await registerRoutes(httpServer, app);
 

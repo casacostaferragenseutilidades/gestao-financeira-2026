@@ -8,6 +8,13 @@
       "when": 1767621390972,
       "tag": "0000_wooden_ezekiel",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1768668852609,
+      "tag": "0001_first_mimic",
+      "breakpoints": true
     }
   ]
 }

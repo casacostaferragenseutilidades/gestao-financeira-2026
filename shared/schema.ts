@@ -72,6 +72,7 @@ export const categories = pgTable("categories", {
   name: text("name").notNull(),
   type: text("type").notNull(), // 'income' | 'expense'
   dreCategory: text("dre_category"), // 'revenue' | 'deductions' | 'costs' | 'operational_expenses'
+  color: text("color"), // 'green' | 'blue' | 'red' | 'yellow' | 'purple' | 'pink' | 'orange' | 'cyan' | 'indigo' | 'gray'
 });
 
 export const insertCategorySchema = createInsertSchema(categories).omit({ id: true });
