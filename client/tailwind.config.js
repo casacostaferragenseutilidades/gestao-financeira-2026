@@ -5,9 +5,11 @@ module.exports = {
   ],
   theme: {
     extend: {
-      // Define a custom 'border' color to match the border-border utility
+      // Define custom colors to match CSS variables
       colors: {
-        border: "hsl(var(--border))"
+        border: "hsl(var(--border))",
+        background: "hsl(var(--background))",
+        foreground: "hsl(var(--foreground))"
       }
     }
   },
