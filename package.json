@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "cross-env NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
-    "build:netlify": "npm run build && npm run build:functions",
+    "build:netlify": "tsx script/build-netlify.ts",
     "build:functions": "tsx script/build-netlify-functions.ts",
     "start": "cross-env NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
