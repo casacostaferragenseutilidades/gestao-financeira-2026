@@ -23,6 +23,8 @@ app.use(express.urlencoded({ extended: false }));
 
 // Health check endpoint
 app.get('/', (req, res) => {
+  console.log('Health check requested');
+  
   res.json({ 
     status: 'ok', 
     message: 'API is working',
@@ -30,4 +32,5 @@ app.get('/', (req, res) => {
   });
 });
 
+// Export handler correctly for Netlify
 export const handler = serverless(app);

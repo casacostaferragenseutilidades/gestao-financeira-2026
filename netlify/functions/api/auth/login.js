@@ -29,6 +29,8 @@ app.use(express.urlencoded({ extended: false }));
 
 // Login endpoint
 app.post('/', (req, res) => {
+  console.log('Login request received:', req.body);
+  
   const { username, password } = req.body;
   
   if (!username || !password) {
@@ -45,6 +47,8 @@ app.post('/', (req, res) => {
     // Mock session/token
     const token = Buffer.from(`${user.id}:${Date.now()}`).toString('base64');
     
+    console.log('Login successful for user:', user.username);
+    
     res.json({
       success: true,
       user: {
@@ -55,6 +59,8 @@ app.post('/', (req, res) => {
       token
     });
   } else {
+    console.log('Login failed for user:', username);
+    
     res.status(401).json({ 
       error: 'Credenciais inválidas',
       message: 'Usuário ou senha incorretos'
@@ -62,4 +68,5 @@ app.post('/', (req, res) => {
   }
 });
 
+// Export handler correctly for Netlify
 export const handler = serverless(app);
