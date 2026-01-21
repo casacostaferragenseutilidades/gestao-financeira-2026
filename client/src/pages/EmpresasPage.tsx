@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Plus, Building2, Trash2, Edit, Users, DollarSign, TrendingUp } from 'lucide-react';
+import { Plus, Building2, Trash2, Edit, Users, DollarSign, TrendingUp, Search, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -12,7 +12,7 @@ interface Empresa {
   id: string;
   nome: string;
   cnpj: string;
-  razao_social: string;
+  razaoSocial: string;
   telefone: string;
   email: string;
   endereco: string;
@@ -27,10 +27,12 @@ export default function EmpresasPage() {
   const [empresas, setEmpresas] = useState<Empresa[]>([]);
   const [showForm, setShowForm] = useState(false);
   const [editingEmpresa, setEditingEmpresa] = useState<Empresa | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [searchingCnpj, setSearchingCnpj] = useState(false);
   const [formData, setFormData] = useState({
     nome: '',
     cnpj: '',
-    razao_social: '',
+    razaoSocial: '',
     telefone: '',
     email: '',
     endereco: ''
@@ -38,57 +40,96 @@ export default function EmpresasPage() {
   const { toast } = useToast();
 
   useEffect(() => {
-    // Carregar empresas do localStorage
-    const storedEmpresas = localStorage.getItem('empresas');
-    if (storedEmpresas) {
-      setEmpresas(JSON.parse(storedEmpresas));
-    }
+    loadEmpresas();
   }, []);
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    
-    if (editingEmpresa) {
-      // Editar empresa existente
-      const updatedEmpresas = empresas.map(emp => 
-        emp.id === editingEmpresa.id 
-          ? { ...emp, ...formData }
-          : emp
-      );
-      setEmpresas(updatedEmpresas);
-      localStorage.setItem('empresas', JSON.stringify(updatedEmpresas));
+  const loadEmpresas = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('/api/companies');
+      if (!response.ok) throw new Error('Falha ao carregar empresas');
+      const data = await response.json();
+      setEmpresas(data);
+    } catch (error) {
       toast({
-        title: "Empresa atualizada",
-        description: "Os dados da empresa foram atualizados com sucesso."
+        title: "Erro",
+        description: "Não foi possível carregar as empresas.",
+        variant: "destructive"
       });
-    } else {
-      // Adicionar nova empresa
-      const novaEmpresa: Empresa = {
-        id: Date.now().toString(),
-        ...formData,
-        status: 'ativa',
-        created_at: new Date().toISOString()
-      };
-      const updatedEmpresas = [...empresas, novaEmpresa];
-      setEmpresas(updatedEmpresas);
-      localStorage.setItem('empresas', JSON.stringify(updatedEmpresas));
-      toast({
-        title: "Empresa cadastrada",
-        description: "Nova empresa adicionada com sucesso."
-      });
+    } finally {
+      setLoading(false);
     }
+  };
 
-    // Resetar formulário
-    setFormData({
-      nome: '',
-      cnpj: '',
-      razao_social: '',
-      telefone: '',
-      email: '',
-      endereco: ''
-    });
-    setShowForm(false);
-    setEditingEmpresa(null);
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+
+    try {
+      setLoading(true);
+      const url = editingEmpresa ? `/api/companies/${editingEmpresa.id}` : '/api/companies';
+      const method = editingEmpresa ? 'PATCH' : 'POST';
+
+      const response = await fetch(url, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(formData),
+      });
+
+      if (!response.ok) {
+        const error = await response.json();
+
+        if (response.status === 400 && error.error?.includes('CNPJ já cadastrado')) {
+          toast({
+            title: "CNPJ já cadastrado",
+            description: "Este CNPJ já está cadastrado no sistema. Por favor, verifique a lista de empresas.",
+            variant: "destructive"
+          });
+          return;
+        }
+
+        throw new Error(error.error || 'Erro ao salvar empresa');
+      }
+
+      const savedEmpresa = await response.json();
+
+      if (editingEmpresa) {
+        setEmpresas(empresas.map(emp =>
+          emp.id === editingEmpresa.id ? savedEmpresa : emp
+        ));
+        toast({
+          title: "Empresa atualizada",
+          description: "Os dados da empresa foram atualizados com sucesso."
+        });
+      } else {
+        setEmpresas([...empresas, savedEmpresa]);
+        toast({
+          title: "Empresa cadastrada",
+          description: "Nova empresa adicionada com sucesso."
+        });
+      }
+
+      // Resetar formulário
+      setFormData({
+        nome: '',
+        cnpj: '',
+        razaoSocial: '',
+        telefone: '',
+        email: '',
+        endereco: ''
+      });
+      setShowForm(false);
+      setEditingEmpresa(null);
+    } catch (error: any) {
+      toast({
+        title: "Erro",
+        description: error.message || "Não foi possível salvar a empresa.",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleEdit = (empresa: Empresa) => {
@@ -96,7 +137,7 @@ export default function EmpresasPage() {
     setFormData({
       nome: empresa.nome,
       cnpj: empresa.cnpj,
-      razao_social: empresa.razao_social,
+      razaoSocial: empresa.razaoSocial,
       telefone: empresa.telefone,
       email: empresa.email,
       endereco: empresa.endereco
@@ -104,26 +145,125 @@ export default function EmpresasPage() {
     setShowForm(true);
   };
 
-  const handleDelete = (id: string) => {
-    if (confirm('Tem certeza que deseja excluir esta empresa?')) {
-      const updatedEmpresas = empresas.filter(emp => emp.id !== id);
-      setEmpresas(updatedEmpresas);
-      localStorage.setItem('empresas', JSON.stringify(updatedEmpresas));
+  const handleDelete = async (id: string) => {
+    if (!confirm('Tem certeza que deseja excluir esta empresa?')) return;
+
+    try {
+      setLoading(true);
+      const response = await fetch(`/api/companies/${id}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        throw new Error('Erro ao excluir empresa');
+      }
+
+      setEmpresas(empresas.filter(emp => emp.id !== id));
       toast({
         title: "Empresa excluída",
         description: "A empresa foi removida com sucesso."
       });
+    } catch (error) {
+      toast({
+        title: "Erro",
+        description: "Não foi possível excluir a empresa.",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
     }
   };
 
-  const toggleStatus = (id: string) => {
-    const updatedEmpresas = empresas.map(emp => 
-      emp.id === id 
-        ? { ...emp, status: emp.status === 'ativa' ? 'inativa' : 'ativa' }
-        : emp
-    );
-    setEmpresas(updatedEmpresas);
-    localStorage.setItem('empresas', JSON.stringify(updatedEmpresas));
+  const toggleStatus = async (id: string) => {
+    try {
+      const empresa = empresas.find(emp => emp.id === id);
+      if (!empresa) return;
+
+      const newStatus = empresa.status === 'ativa' ? 'inativa' : 'ativa';
+      const response = await fetch(`/api/companies/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ status: newStatus }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Erro ao alterar status');
+      }
+
+      const updatedEmpresa = await response.json();
+      setEmpresas(empresas.map(emp =>
+        emp.id === id ? updatedEmpresa : emp
+      ));
+    } catch (error) {
+      toast({
+        title: "Erro",
+        description: "Não foi possível alterar o status da empresa.",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const searchCnpj = async () => {
+    const cnpj = formData.cnpj.replace(/\D/g, '');
+
+    if (cnpj.length !== 14) {
+      toast({
+        title: "CNPJ inválido",
+        description: "Digite um CNPJ completo com 14 dígitos.",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    try {
+      setSearchingCnpj(true);
+
+      // Usar o backend como proxy para evitar CORS
+      const response = await fetch(`/api/companies/search/cnpj/${cnpj}`);
+
+      if (!response.ok) {
+        const error = await response.json();
+        if (response.status === 409) {
+          // CNPJ já cadastrado
+          toast({
+            title: "CNPJ já cadastrado",
+            description: `Este CNPJ já está cadastrado para a empresa: ${error.company.nome}`,
+            variant: "destructive"
+          });
+          return;
+        }
+        throw new Error(error.error || 'CNPJ não encontrado');
+      }
+
+      const data = await response.json();
+
+      // O backend já retorna os dados formatados
+      if (data.nome || data.razaoSocial) {
+        setFormData({
+          ...formData,
+          nome: data.nome || '',
+          razaoSocial: data.razaoSocial || '',
+          endereco: data.endereco || '',
+          telefone: data.telefone || '',
+          email: data.email || ''
+        });
+
+        toast({
+          title: "CNPJ encontrado",
+          description: "Dados da empresa foram preenchidos automaticamente.",
+        });
+      }
+    } catch (error: any) {
+      toast({
+        title: "Erro na busca",
+        description: error.message || "Não foi possível buscar os dados do CNPJ.",
+        variant: "destructive"
+      });
+    } finally {
+      setSearchingCnpj(false);
+    }
   };
 
   return (
@@ -168,9 +308,9 @@ export default function EmpresasPage() {
                 </div>
               </div>
               <CardDescription className="text-sm">
-                {empresa.razao_social}
+                {empresa.razaoSocial}
               </CardDescription>
-              <Badge 
+              <Badge
                 variant={empresa.status === 'ativa' ? 'default' : 'secondary'}
                 className="mt-2"
               >
@@ -196,7 +336,7 @@ export default function EmpresasPage() {
                   <p className="text-muted-foreground">{empresa.endereco}</p>
                 </div>
               </div>
-              
+
               {/* Resumo Financeiro */}
               <div className="border-t pt-3 mt-3">
                 <h4 className="font-medium mb-2 flex items-center gap-2">
@@ -294,7 +434,7 @@ export default function EmpresasPage() {
                     <Input
                       id="nome"
                       value={formData.nome}
-                      onChange={(e) => setFormData({...formData, nome: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, nome: e.target.value })}
                       placeholder="Nome da empresa"
                       required
                     />
@@ -303,28 +443,44 @@ export default function EmpresasPage() {
                     <Label htmlFor="razao_social">Razão Social *</Label>
                     <Input
                       id="razao_social"
-                      value={formData.razao_social}
-                      onChange={(e) => setFormData({...formData, razao_social: e.target.value})}
+                      value={formData.razaoSocial}
+                      onChange={(e) => setFormData({ ...formData, razaoSocial: e.target.value })}
                       placeholder="Razão social completa"
                       required
                     />
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="cnpj">CNPJ *</Label>
-                    <Input
-                      id="cnpj"
-                      value={formData.cnpj}
-                      onChange={(e) => setFormData({...formData, cnpj: e.target.value})}
-                      placeholder="00.000.000/0000-00"
-                      required
-                    />
+                    <div className="flex gap-2">
+                      <Input
+                        id="cnpj"
+                        value={formData.cnpj}
+                        onChange={(e) => setFormData({ ...formData, cnpj: e.target.value })}
+                        placeholder="00.000.000/0000-00"
+                        required
+                        disabled={searchingCnpj}
+                      />
+                      <Button
+                        type="button"
+                        variant="outline"
+                        onClick={searchCnpj}
+                        disabled={searchingCnpj || !formData.cnpj}
+                        className="px-3"
+                      >
+                        {searchingCnpj ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Search className="h-4 w-4" />
+                        )}
+                      </Button>
+                    </div>
                   </div>
                   <div className="space-y-2">
                     <Label htmlFor="telefone">Telefone</Label>
                     <Input
                       id="telefone"
                       value={formData.telefone}
-                      onChange={(e) => setFormData({...formData, telefone: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, telefone: e.target.value })}
                       placeholder="(00) 00000-0000"
                     />
                   </div>
@@ -334,7 +490,7 @@ export default function EmpresasPage() {
                       id="email"
                       type="email"
                       value={formData.email}
-                      onChange={(e) => setFormData({...formData, email: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                       placeholder="empresa@exemplo.com"
                     />
                   </div>
@@ -343,12 +499,12 @@ export default function EmpresasPage() {
                     <Input
                       id="endereco"
                       value={formData.endereco}
-                      onChange={(e) => setFormData({...formData, endereco: e.target.value})}
+                      onChange={(e) => setFormData({ ...formData, endereco: e.target.value })}
                       placeholder="Rua, número, bairro, cidade - UF"
                     />
                   </div>
                 </div>
-                
+
                 <div className="flex gap-3 pt-4">
                   <Button
                     type="button"
@@ -359,17 +515,24 @@ export default function EmpresasPage() {
                       setFormData({
                         nome: '',
                         cnpj: '',
-                        razao_social: '',
+                        razaoSocial: '',
                         telefone: '',
                         email: '',
                         endereco: ''
                       });
                     }}
-                    >
+                  >
                     Cancelar
                   </Button>
-                  <Button type="submit">
-                    {editingEmpresa ? 'Atualizar' : 'Cadastrar'}
+                  <Button type="submit" disabled={loading}>
+                    {loading ? (
+                      <>
+                        <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                        {editingEmpresa ? 'Atualizando...' : 'Cadastrando...'}
+                      </>
+                    ) : (
+                      editingEmpresa ? 'Atualizar' : 'Cadastrar'
+                    )}
                   </Button>
                 </div>
               </form>

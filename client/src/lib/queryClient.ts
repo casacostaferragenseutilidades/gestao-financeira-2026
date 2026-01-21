@@ -7,14 +7,55 @@ async function throwIfResNotOk(res: Response) {
   }
 }
 
+function getCompanyHeaders(): Record<string, string> {
+  const stored = localStorage.getItem('empresaAtiva');
+  if (stored) {
+    try {
+      const empresa = JSON.parse(stored);
+      if (empresa && empresa.id) {
+        return { 'x-company-id': String(empresa.id) };
+      }
+    } catch (e) {
+      console.error('Error parsing empresaAtiva', e);
+    }
+  }
+  return {};
+}
+
+function appendCompanyParam(url: string) {
+  const stored = localStorage.getItem('empresaAtiva');
+  if (stored) {
+    try {
+      const empresa = JSON.parse(stored);
+      if (empresa && empresa.id) {
+        const separator = url.includes('?') ? '&' : '?';
+        return `${url}${separator}companyId=${empresa.id}`;
+      }
+    } catch (e) {
+      console.error('Error parsing empresaAtiva for URL param', e);
+    }
+  }
+  return url;
+}
+
 export async function apiRequest(
   method: string,
   url: string,
   data?: unknown | undefined,
 ): Promise<Response> {
-  const res = await fetch(url, {
+  const headers: Record<string, string> = {
+    ...getCompanyHeaders(),
+  };
+
+  if (data) {
+    headers["Content-Type"] = "application/json";
+  }
+
+  const finalUrl = appendCompanyParam(url);
+
+  const res = await fetch(finalUrl, {
     method,
-    headers: data ? { "Content-Type": "application/json" } : {},
+    headers,
     body: data ? JSON.stringify(data) : undefined,
     credentials: "include",
   });
@@ -28,18 +69,20 @@ export const getQueryFn: <T>(options: {
   on401: UnauthorizedBehavior;
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
-  async ({ queryKey }) => {
-    const res = await fetch(queryKey.join("/") as string, {
-      credentials: "include",
-    });
+    async ({ queryKey }) => {
+      const url = appendCompanyParam(queryKey.join("/") as string);
+      const res = await fetch(url, {
+        headers: { ...getCompanyHeaders() },
+        credentials: "include",
+      });
 
-    if (unauthorizedBehavior === "returnNull" && res.status === 401) {
-      return null;
-    }
+      if (unauthorizedBehavior === "returnNull" && res.status === 401) {
+        return null;
+      }
 
-    await throwIfResNotOk(res);
-    return await res.json();
-  };
+      await throwIfResNotOk(res);
+      return await res.json();
+    };
 
 export const queryClient = new QueryClient({
   defaultOptions: {

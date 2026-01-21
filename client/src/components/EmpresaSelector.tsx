@@ -9,7 +9,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Badge } from '@/components/ui/badge';
-import { useNavigate } from 'wouter';
+import { useLocation } from 'wouter';
 
 interface Empresa {
   id: string;
@@ -26,21 +26,51 @@ interface EmpresaSelectorProps {
 export function EmpresaSelector({ onNovaEmpresa }: EmpresaSelectorProps) {
   const [empresas, setEmpresas] = useState<Empresa[]>([]);
   const [empresaAtiva, setEmpresaAtiva] = useState<Empresa | null>(null);
-  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
+  const [, navigate] = useLocation();
 
   useEffect(() => {
-    // Carregar empresas do localStorage
-    const storedEmpresas = localStorage.getItem('empresas');
-    if (storedEmpresas) {
-      setEmpresas(JSON.parse(storedEmpresas));
-    }
+    loadEmpresas();
+    loadEmpresaAtiva();
+  }, []);
 
-    // Carregar empresa ativa
+  const loadEmpresas = async () => {
+    try {
+      const response = await fetch('/api/companies');
+      if (!response.ok) {
+        if (response.status === 401) {
+          console.error('Usuário não autenticado. Faça login para acessar as empresas.');
+          // O usuário precisa estar autenticado para acessar a API
+          return;
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+      const data = await response.json();
+      setEmpresas(data);
+    } catch (error) {
+      console.error('Erro ao carregar empresas:', error);
+      // Se for erro de parse, provavelmente é problema de autenticação
+      if (error instanceof SyntaxError && error.message.includes('JSON')) {
+        console.error('Resposta não é JSON - verifique se está autenticado');
+        // Tenta carregar do localStorage como fallback
+        const storedEmpresas = localStorage.getItem('empresas');
+        if (storedEmpresas) {
+          try {
+            setEmpresas(JSON.parse(storedEmpresas));
+          } catch (e) {
+            console.error('Erro ao carregar do localStorage:', e);
+          }
+        }
+      }
+    }
+  };
+
+  const loadEmpresaAtiva = () => {
     const storedAtiva = localStorage.getItem('empresaAtiva');
     if (storedAtiva) {
       setEmpresaAtiva(JSON.parse(storedAtiva));
     }
-  }, []);
+  };
 
   const selecionarEmpresa = (empresa: Empresa) => {
     setEmpresaAtiva(empresa);

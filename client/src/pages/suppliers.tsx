@@ -191,16 +191,28 @@ export default function Suppliers() {
       const cleanCNPJ = cnpj.replace(/[^\d]/g, '');
       if (cleanCNPJ.length !== 14) return;
 
-      const response = await fetch(`https://publica.cnpj.ws/cnpj/${cleanCNPJ}`);
-      if (!response.ok) return;
+      // Use the backend proxy (which now uses BrasilAPI)
+      const response = await fetch(`/api/companies/search/cnpj/${cleanCNPJ}`);
+
+      if (!response.ok) {
+        toast({
+          title: "Erro na busca",
+          description: "CNPJ não encontrado ou erro na consulta.",
+          variant: "destructive",
+        });
+        return;
+      }
 
       const data = await response.json();
 
-      if (data.estabelecimento) {
-        form.setValue('name', data.estabelecimento.nome_fantasia || data.estabelecimento.nome_empresarial || '');
-        form.setValue('email', data.estabelecimento.email || '');
-        form.setValue('phone', data.estabelecimento.ddd1 + data.estabelecimento.telefone1 || '');
-        form.setValue('address', `${data.estabelecimento.tipo_logradouro || ''} ${data.estabelecimento.logradouro || ''}, ${data.estabelecimento.numero || ''}, ${data.estabelecimento.bairro || ''}, ${data.estabelecimento.municipio || ''} - ${data.estabelecimento.uf || ''}`.trim());
+      if (data.nome || data.razaoSocial) {
+        form.setValue('name', data.nome || '');
+        form.setValue('email', data.email || '');
+        form.setValue('phone', data.telefone || '');
+        form.setValue('address', data.endereco || '');
+
+        // If contact is empty, maybe use a default? Or leave it.
+        // form.setValue('contact', ...);
 
         toast({
           title: "Dados encontrados",

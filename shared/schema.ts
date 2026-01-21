@@ -4,7 +4,7 @@ import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
 export const users = pgTable("users", {
-  id: uuid("id").primaryKey().defaultRandom().notNull(),
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
   username: text("username").notNull(),
   email: text("email"),
   password: text("password"),
@@ -108,6 +108,7 @@ export const accountsPayable = pgTable("accounts_payable", {
   attachmentUrl: text("attachment_url"),
   recurrence: text("recurrence"), // 'none' | 'monthly' | 'weekly'
   recurrenceEnd: text("recurrence_end"),
+  companyId: varchar("company_id").references(() => companies.id),
   active: boolean("active").notNull().default(true),
 });
 
@@ -131,6 +132,7 @@ export const accountsReceivable = pgTable("accounts_receivable", {
   recurrence: text("recurrence"), // 'none' | 'monthly' | 'weekly' | 'yearly'
   recurrencePeriod: text("recurrence_period"), // Date string or number of occurrences (stored as text)
   paymentMethod: text("payment_method"), // 'money', 'pix', 'credit_card', 'debit_card', 'boleto', 'transfer'
+  companyId: varchar("company_id").references(() => companies.id),
   active: boolean("active").notNull().default(true),
 });
 
@@ -248,6 +250,7 @@ export const cashFlowEntries = pgTable("cash_flow_entries", {
   actualDate: date("actual_date"), // Data real do pagamento/recebimento
   createdAt: timestamp("created_at").notNull().defaultNow(),
   userId: varchar("user_id").references(() => users.id),
+  companyId: varchar("company_id").references(() => companies.id),
 });
 
 // Balance Adjustments (Ajustes de Saldo)
@@ -312,6 +315,24 @@ export interface CashFlowAlert {
   date: string;
   relatedId?: string;
 }
+
+// Companies (Empresas)
+export const companies = pgTable("companies", {
+  id: varchar("id").primaryKey().default(sql`gen_random_uuid()`),
+  nome: text("nome").notNull(), // Nome fantasia
+  razaoSocial: text("razao_social").notNull(),
+  cnpj: text("cnpj").notNull().unique(),
+  telefone: text("telefone"),
+  email: text("email"),
+  endereco: text("endereco"),
+  status: text("status").notNull().default("ativa"), // 'ativa' | 'inativa'
+  createdAt: timestamp("created_at").defaultNow(),
+  updatedAt: timestamp("updated_at").defaultNow(),
+});
+
+export const insertCompanySchema = createInsertSchema(companies).omit({ id: true, createdAt: true, updatedAt: true });
+export type InsertCompany = z.infer<typeof insertCompanySchema>;
+export type Company = typeof companies.$inferSelect;
 
 // Notes (Anotações)
 export const notes = pgTable("notes", {

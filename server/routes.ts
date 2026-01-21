@@ -61,22 +61,22 @@ export async function registerRoutes(
   app.post("/api/auth/register", async (req, res) => {
     try {
       const { username, email, password, fullName } = req.body;
-      
+
       // Check if user already exists
       const existingUser = await storage.getUserByUsername(username);
       if (existingUser) {
         return res.status(400).json({ error: "Nome de usuário já existe" });
       }
-      
+
       // Hash password and create user
       const { scrypt, randomBytes } = await import("crypto");
       const { promisify } = await import("util");
       const scryptAsync = promisify(scrypt);
-      
+
       const salt = randomBytes(16).toString("hex");
       const buf = (await scryptAsync(password, salt, 64)) as Buffer;
       const hashedPassword = `${buf.toString("hex")}.${salt}`;
-      
+
       const newUser = await storage.createUser({
         username,
         email,
@@ -86,7 +86,7 @@ export async function registerRoutes(
         role: "viewer",
         status: "active"
       });
-      
+
       // Auto-login after registration
       req.login({
         id: newUser.id,
@@ -100,7 +100,7 @@ export async function registerRoutes(
           console.error("Auto-login error:", err);
         }
       });
-      
+
       res.json({
         user: {
           id: newUser.id,
@@ -151,6 +151,110 @@ export async function registerRoutes(
     }
     await storage.deleteUser(req.params.id);
     res.status(204).send();
+  });
+
+  // Companies (Empresas) routes
+  app.get("/api/companies", requireViewer, async (req, res) => {
+    const companies = await storage.getCompanies();
+    res.json(companies);
+  });
+
+  app.get("/api/companies/:id", requireViewer, async (req, res) => {
+    const company = await storage.getCompany(req.params.id);
+    if (!company) return res.status(404).json({ error: "Empresa não encontrada" });
+    res.json(company);
+  });
+
+  app.post("/api/companies", requireFinancial, async (req, res) => {
+    try {
+      // Check if CNPJ already exists
+      const existingCompany = await storage.getCompanyByCnpj(req.body.cnpj);
+      if (existingCompany) {
+        return res.status(400).json({ error: "CNPJ já cadastrado" });
+      }
+
+      const company = await storage.createCompany(req.body);
+      res.status(201).json(company);
+    } catch (error: any) {
+      console.error("Error creating company:", error);
+      res.status(400).json({ error: "Erro ao criar empresa", details: error.message });
+    }
+  });
+
+  app.patch("/api/companies/:id", requireFinancial, async (req, res) => {
+    try {
+      // If updating CNPJ, check if it already exists
+      if (req.body.cnpj) {
+        const existingCompany = await storage.getCompanyByCnpj(req.body.cnpj);
+        if (existingCompany && existingCompany.id !== req.params.id) {
+          return res.status(400).json({ error: "CNPJ já cadastrado" });
+        }
+      }
+
+      const company = await storage.updateCompany(req.params.id, req.body);
+      if (!company) return res.status(404).json({ error: "Empresa não encontrada" });
+      res.json(company);
+    } catch (error: any) {
+      console.error("Error updating company:", error);
+      res.status(400).json({ error: "Erro ao atualizar empresa", details: error.message });
+    }
+  });
+
+  app.delete("/api/companies/:id", requireFinancial, async (req, res) => {
+    try {
+      await storage.deleteCompany(req.params.id);
+      res.status(204).send();
+    } catch (error: any) {
+      console.error("Error deleting company:", error);
+      res.status(500).json({ error: "Erro ao excluir empresa", details: error.message });
+    }
+  });
+
+  // CNPJ Search endpoint - sem autenticação para permitir teste
+  app.get("/api/companies/search/cnpj/:cnpj", async (req, res) => {
+    try {
+      const { cnpj } = req.params;
+      // Remove qualquer caractere não numérico do CNPJ
+      const cleanCnpj = cnpj.replace(/\D/g, '');
+
+      if (cleanCnpj.length !== 14) {
+        return res.status(400).json({ error: "CNPJ inválido" });
+      }
+
+      // Search CNPJ in BrasilAPI (more reliable for this usage)
+      console.log(`Searching CNPJ ${cleanCnpj} in BrasilAPI...`);
+      const response = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cleanCnpj}`, {
+        headers: {
+          'User-Agent': 'GestaoFinanceira/1.0'
+        }
+      });
+
+      console.log(`BrasilAPI response status: ${response.status}`);
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          return res.status(404).json({ error: "CNPJ não encontrado na base de dados" });
+        }
+        return res.status(response.status).json({ error: "Erro ao consultar API de CNPJ" });
+      }
+
+      const data = await response.json();
+
+      // Transform response to match our format
+      const formattedData = {
+        razaoSocial: data.razao_social || '',
+        nome: data.nome_fantasia || data.razao_social || '',
+        cnpj: cleanCnpj,
+        endereco: `${data.logradouro || ''}, ${data.numero || ''} ${data.complemento || ''}, ${data.bairro || ''}, ${data.municipio || ''} - ${data.uf || ''}`.replace(/, ,/g, ',').replace(/, $/g, '').trim(),
+        telefone: data.ddd_telefone_1 ? `(${data.ddd_telefone_1}) ${data.telefone_1}` : '',
+        email: data.email || ''
+      };
+
+      res.json(formattedData);
+    } catch (error: any) {
+      console.error("Error searching CNPJ:", error);
+      res.status(500).json({ error: "Erro ao buscar CNPJ", details: error.message });
+    }
   });
 
   app.get("/api/suppliers", requireViewer, async (req, res) => {
@@ -251,21 +355,28 @@ export async function registerRoutes(
   });
 
   app.get("/api/accounts-payable", requireViewer, async (req, res) => {
-    const accounts = await storage.getAccountsPayable();
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    console.log(`GET /api/accounts-payable called. CompanyID from request: ${companyId}`);
+    const accounts = await storage.getAccountsPayable(companyId);
+    console.log(`GET /api/accounts-payable returning ${accounts.length} accounts`);
     res.json(accounts);
   });
 
   app.get("/api/accounts-payable/upcoming", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const upcoming = await storage.getUpcomingAccountsPayable(startDate, endDate);
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const upcoming = await storage.getUpcomingAccountsPayable(startDate, endDate, companyId);
     res.json(upcoming);
   });
+
 
   app.post("/api/accounts-payable", requireFinancial, async (req, res) => {
     try {
       console.log("POST /api/accounts-payable", JSON.stringify(req.body));
-      const account = await storage.createAccountPayable(req.body);
+      const companyId = req.headers['x-company-id'] as string;
+      // Merge companyId into the body
+      const account = await storage.createAccountPayable({ ...req.body, companyId });
       res.status(201).json(account);
     } catch (err) {
       res.status(400).json({ error: "Erro ao criar conta a pagar" });
@@ -296,19 +407,22 @@ export async function registerRoutes(
   });
 
   app.get("/api/accounts-receivable", requireViewer, async (req, res) => {
-    const accounts = await storage.getAccountsReceivable();
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const accounts = await storage.getAccountsReceivable(companyId);
     res.json(accounts);
   });
 
   app.get("/api/accounts-receivable/upcoming", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const upcoming = await storage.getUpcomingAccountsReceivable(startDate, endDate);
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const upcoming = await storage.getUpcomingAccountsReceivable(startDate, endDate, companyId);
     res.json(upcoming);
   });
 
   app.post("/api/accounts-receivable", requireFinancial, async (req, res) => {
-    const account = await storage.createAccountReceivable(req.body);
+    const companyId = req.headers['x-company-id'] as string;
+    const account = await storage.createAccountReceivable({ ...req.body, companyId });
     res.status(201).json(account);
   });
 
@@ -332,21 +446,24 @@ export async function registerRoutes(
   app.get("/api/dashboard/stats", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const stats = await storage.getDashboardStats(startDate, endDate);
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const stats = await storage.getDashboardStats(startDate, endDate, companyId);
     res.json(stats);
   });
 
   app.get("/api/dashboard/cash-flow", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const data = await storage.getCashFlowDataByDateRange(startDate, endDate);
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const data = await storage.getCashFlowDataByDateRange(startDate, endDate, companyId);
     res.json(data);
   });
 
   app.get("/api/dashboard/category-expenses", requireViewer, async (req, res) => {
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
-    const data = await storage.getCategoryExpensesByDateRange(startDate, endDate);
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const data = await storage.getCategoryExpensesByDateRange(startDate, endDate, companyId);
     res.json(data);
   });
 
@@ -354,12 +471,13 @@ export async function registerRoutes(
     const period = (req.query.period as string) || "daily";
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
 
     let data;
     if (startDate && endDate) {
-      data = await storage.getCashFlowDataByDateRange(startDate, endDate);
+      data = await storage.getCashFlowDataByDateRange(startDate, endDate, companyId);
     } else {
-      data = await storage.getCashFlowData(period);
+      data = await storage.getCashFlowData(period, companyId);
     }
     res.json(data);
   });
@@ -368,10 +486,11 @@ export async function registerRoutes(
     const period = (req.query.period as string) || "daily";
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
 
     let summary;
     if (startDate && endDate) {
-      summary = await storage.getCashFlowSummaryByDateRange(startDate, endDate);
+      summary = await storage.getCashFlowSummaryByDateRange(startDate, endDate, companyId);
     } else {
       summary = await storage.getCashFlowSummary(period);
     }
@@ -382,24 +501,27 @@ export async function registerRoutes(
     const period = (req.query.period as string) || "daily";
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
 
     let kpis;
     if (startDate && endDate) {
-      kpis = await storage.getCashFlowKPIsByDateRange(startDate, endDate);
+      kpis = await storage.getCashFlowKPIsByDateRange(startDate, endDate, companyId);
     } else {
-      kpis = await storage.getCashFlowKPIs(period);
+      kpis = await storage.getCashFlowKPIs(period, companyId);
     }
     res.json(kpis);
   });
 
   app.get("/api/cash-flow/alerts", requireViewer, async (req, res) => {
-    const alerts = await storage.getCashFlowAlerts();
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const alerts = await storage.getCashFlowAlerts(companyId);
     res.json(alerts);
   });
 
   app.get("/api/cash-flow/movements/:date", requireViewer, async (req, res) => {
     const { date } = req.params;
-    const movements = await storage.getDailyMovements(date);
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const movements = await storage.getDailyMovements(date, companyId);
     res.json(movements);
   });
 
@@ -408,18 +530,19 @@ export async function registerRoutes(
     const period = req.query.period as string;
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
 
     let movements;
     if (startDate && endDate) {
-      movements = await storage.getMovementsByDateRange(startDate, endDate);
+      movements = await storage.getMovementsByDateRange(startDate, endDate, companyId);
     } else if (period) {
-      movements = await storage.getMovementsByPeriod(period);
+      movements = await storage.getMovementsByPeriod(period, companyId);
     } else if (date) {
-      movements = await storage.getDailyMovements(date);
+      movements = await storage.getDailyMovements(date, companyId);
     } else {
       // Default to today's movements
       const today = new Date().toISOString().split("T")[0];
-      movements = await storage.getDailyMovements(today);
+      movements = await storage.getDailyMovements(today, companyId);
     }
     res.json(movements);
   });
@@ -432,7 +555,8 @@ export async function registerRoutes(
       }
 
       console.log("Creating cash flow entry with body:", req.body);
-      const entry = await storage.createCashFlowEntry({ ...req.body, userId });
+      const companyId = req.headers['x-company-id'] as string;
+      const entry = await storage.createCashFlowEntry({ ...req.body, userId, companyId });
       res.json(entry);
     } catch (error: any) {
       console.error("Error creating cash flow entry:", error);
@@ -441,7 +565,8 @@ export async function registerRoutes(
   });
 
   app.get("/api/cash-flow/entries", requireViewer, async (req, res) => {
-    const entries = await storage.getCashFlowEntries();
+    const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);
+    const entries = await storage.getCashFlowEntries(companyId);
     res.json(entries);
   });
 
