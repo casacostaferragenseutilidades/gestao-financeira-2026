@@ -80,7 +80,7 @@ export interface IStorage {
   markAccountReceivableAsReceived(id: string, receivedDate: string, discount?: string, paymentMethod?: string): Promise<AccountReceivable | undefined>;
   deleteAccountReceivable(id: string): Promise<boolean>;
 
-  getDashboardStats(): Promise<DashboardStats>;
+  getDashboardStats(startDate?: string, endDate?: string, companyId?: string): Promise<DashboardStats>;
   getCashFlowData(period: string): Promise<CashFlowData[]>;
   getCashFlowDataByDateRange(startDate: string, endDate: string): Promise<CashFlowData[]>;
   getCashFlowSummary(period: string): Promise<{ totalIncome: number; totalExpense: number; netFlow: number; projectedBalance: number; currentBalance: number; initialBalance: number; finalBalance: number; totalIncomePending: number; totalExpensePending: number; totalIncomeConfirmed: number; totalExpenseConfirmed: number }>;
@@ -790,10 +790,22 @@ export class DatabaseStorage implements IStorage {
     return true;
   }
 
-  async getDashboardStats(startDate?: string, endDate?: string): Promise<DashboardStats> {
-    const allPayables = await db.select().from(accountsPayable);
-    const allReceivables = await db.select().from(accountsReceivable);
-    const allCashFlowEntries = await db.select().from(cashFlowEntries);
+  async getDashboardStats(startDate?: string, endDate?: string, companyId?: string): Promise<DashboardStats> {
+    console.log(`[Storage] Fetching dashboard stats. Date range: ${startDate} to ${endDate}, CompanyID: ${companyId}`);
+
+    let allPayables, allReceivables, allCashFlowEntries;
+
+    if (companyId) {
+      allPayables = await db.select().from(accountsPayable).where(eq(accountsPayable.companyId, companyId));
+      allReceivables = await db.select().from(accountsReceivable).where(eq(accountsReceivable.companyId, companyId));
+      allCashFlowEntries = await db.select().from(cashFlowEntries).where(eq(cashFlowEntries.companyId, companyId));
+    } else {
+      allPayables = await db.select().from(accountsPayable);
+      allReceivables = await db.select().from(accountsReceivable);
+      allCashFlowEntries = await db.select().from(cashFlowEntries);
+    }
+
+    console.log(`[Storage] Results found: Payables: ${allPayables.length}, Receivables: ${allReceivables.length}, CashFlow: ${allCashFlowEntries.length}`);
 
     const today = new Date();
     const todayStr = today.toISOString().split("T")[0];

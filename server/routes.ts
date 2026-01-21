@@ -14,8 +14,11 @@ export async function registerRoutes(
   // Register Supabase Auth routes
   app.use("/api/supabase-auth", supabaseAuthRoutes);
 
-  // Health check endpoint for Render
+  // Health check endpoints for Render
   app.get("/health", (req, res) => {
+    res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+  app.get("/api/health", (req, res) => {
     res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
@@ -447,6 +450,7 @@ export async function registerRoutes(
   });
 
   app.get("/api/dashboard/stats", requireViewer, async (req, res) => {
+    console.log(`[Dashboard API] Fetching stats for user: ${req.user?.username}, authenticated: ${req.isAuthenticated()}`);
     const startDate = req.query.startDate as string;
     const endDate = req.query.endDate as string;
     const companyId = (req.query.companyId as string) || (req.headers['x-company-id'] as string);

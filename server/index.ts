@@ -4,9 +4,14 @@ import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
 import { storage } from "./storage";
+import { db } from "./db";
+import { sql } from "drizzle-orm";
 
 const app = express();
 const httpServer = createServer(app);
+
+// Trust proxy for secure cookies on Render
+app.set("trust proxy", 1);
 
 // CORS configuration
 app.use((req, res, next) => {
@@ -82,6 +87,15 @@ export { app, httpServer };
 
 if (process.env.NODE_ENV !== "test" && !process.env.VERCEL) {
   (async () => {
+    // Test database connection
+    try {
+      await db.execute(sql`SELECT 1`);
+      log("✓ Database connected successfully");
+    } catch (err) {
+      log(`✗ Database connection failed: ${err}`);
+      console.error(err);
+    }
+
     await storage.initializeDatabase(); // Inicializar banco de dados
     await storage.seedDefaultData();
     await registerRoutes(httpServer, app);
